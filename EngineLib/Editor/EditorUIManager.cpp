@@ -1265,10 +1265,11 @@ void FEditorUIManager::updatePropertyWindowGUI(const FGuiReference& guiReference
 						ImGui::Text("UUID: %d", component->UUID);
 
 						FString componentName = component->GetName().ToString();
-						ImGui::Text("Name: %s | DisplayIndex: %d | ComparisonIndex: %d",
+						ImGui::Text("Name: %s | DisplayIndex: %d | ComparisonIndex: %d | Number: %d",
 							componentName.CStr(),
-							component->GetName().DisplayIndex,
-							component->GetName().ComparisonIndex);
+							component->GetName().GetDisplayId().ToUnstableInt(),
+							component->GetName().GetComparisonId().ToUnstableInt(),
+							component->GetName().GetNumber());
 
 						/* Property Reflection UI Drawing */
 						component->ForEachProperty(
@@ -1445,10 +1446,11 @@ void FEditorUIManager::updateObjectListPanelGUI(const FGuiReference& guiReferenc
 						ImGui::Text("Class: %s", object->GetRuntimeClass()->Name.CStr());
 						ImGui::Text("UUID: %d", object->UUID);
 						FString ObjectName = object->GetName().ToString();
-						ImGui::Text("Name: %s | DisplayIndex: %d | ComparisonIndex: %d",
+						ImGui::Text("Name: %s | DisplayIndex: %d | ComparisonIndex: %d | Number: %d",
 							ObjectName.CStr(),
-							object->GetName().DisplayIndex,
-							object->GetName().ComparisonIndex
+							object->GetName().GetDisplayId().ToUnstableInt(),
+							object->GetName().GetComparisonId().ToUnstableInt(),
+							object->GetName().GetNumber()
 						);
 
 						// TODO: Move implement delete to where?
