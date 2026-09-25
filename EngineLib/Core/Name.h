@@ -8,6 +8,12 @@
 // Max size of name, including the null terminator
 enum { NAME_SIZE = 1024 };
 
+enum class ENameCase : uint8
+{
+	CaseSensitive,
+	IgnoreCase,
+};
+
 struct FNameEntryId
 {
 	constexpr FNameEntryId() : Value(0) {}

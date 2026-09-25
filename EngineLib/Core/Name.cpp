@@ -6,6 +6,8 @@
 #include <vector>
 #include <algorithm>
 #include <unordered_map>
+#include <shared_mutex>
+#include <mutex>
 
 static constexpr uint32 FNameMaxBlockBits = 13;
 static constexpr uint32 FNameBlockOffsetBits = 16;
@@ -192,6 +194,32 @@ struct FNameDisplayValue : public FNameValue
 	{
 		Hash = FNameHash(InName.data(), static_cast<int32>(InName.length()));
 	}
+};
+
+class FNamePoolShardBase
+{
+public:
+	void Initialize(FNameEntryAllocator& InEntries)
+	{
+		Entries = &InEntries;
+		UsedSlots = 0;
+	}
+
+	~FNamePoolShardBase()
+	{
+		UsedSlots = 0;
+		CapacityMask = 0;
+		Slots = nullptr;
+	}
+
+protected:
+	enum { LoadFactorQuotient = 9, LoadFactorDivisor = 10}; // Realloc slots when 90% full
+
+	mutable std::shared_mutex Lock;
+	uint32 UsedSlots = 0;
+	uint32 CapacityMask = 0;
+	FNameSlot* Slots = nullptr;
+	FNameEntryAllocator* Entries = nullptr;
 };
 
 // FNamePool
