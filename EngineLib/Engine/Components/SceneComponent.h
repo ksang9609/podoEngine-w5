@@ -1,12 +1,11 @@
 ﻿#pragma once
 
 #include "ActorComponent.h"
-#include "Rendering/GraphicsManager.h"
+
+#include <span>
 
 #include "Core/Math/Vector.h"
 #include "Core/Container/TArray.h"
-
-#include <span>
 #include "Core/Object/PropertyInfo.h"
 
 class FTransform;
