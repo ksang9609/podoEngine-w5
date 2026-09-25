@@ -89,23 +89,3 @@ TObject* FObjectFactory::LoadObject(const json::JSON& inJson)
 
 	return instance;
 }
-
-template<typename TComponent, typename... Args>
-	requires(std::derived_from<TComponent, USceneComponent>)
-AActor* FObjectFactory::SpawnActorWithRootComponent(const FName& Name, Args&&... args)
-{
-	TComponent* rootComponent = ConstructObject<TComponent>(std::forward<Args>(args)...);
-	if (!rootComponent)
-	{
-		return nullptr;
-	}
-
-	AActor* actor = createActorWithRootComponent(Name, rootComponent);
-	if (!actor)
-	{
-		delete rootComponent;
-		return nullptr;
-	}
-
-	return actor;
-}

@@ -174,9 +174,6 @@ void FSceneManager::RemoveActor(AActor* actor)
 
 	assert(mCurrentWorld != nullptr);
 	mCurrentWorld->RemoveActor(actor->UUID);
-
-	// TODO?: Consider whether to delete the actor here or manage its lifetime elsewhere.
-	delete actor;
 }
 
 void  FSceneManager::SetSelectedActor(AActor* actor)

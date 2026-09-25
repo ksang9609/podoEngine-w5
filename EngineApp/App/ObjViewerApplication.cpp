@@ -499,29 +499,11 @@ bool FObjViewerApplication::LoadObjFile(const std::filesystem::path& objPath)
 		const FVector boundsExtent = (boundsMax - boundsMin) * 0.5f;
 		const FVector actorLocation(-boundsCenter.x, -boundsCenter.y, -boundsMin.z);
 
-		AActor* newActor = FObjectFactory::SpawnStaticMeshActor(
-			actorLocation, FRotator(0.0f, 0.0f, 0.0f), FVector(1.0f, 1.0f, 1.0f), meshAsset);
-
-		if (newActor == nullptr)
-		{
-			return false;
-		}
-
-		UStaticMeshComponent* meshComponent =
-			newActor->GetComponentByType<UStaticMeshComponent>();
-
-		if (meshComponent != nullptr)
-		{
-			meshComponent->SetUseTexture(true);
-		}
-
-		if (mDisplayedActor != nullptr)
-		{
-			mSceneManager->RemoveActor(mDisplayedActor);
-		}
-
-		mDisplayedActor = newActor;
-		mSceneManager->GetCurrentWorld()->AddActor(mDisplayedActor);
+		mDisplayedActor = mSceneManager->GetCurrentWorld()
+			->SpawnActorWithRootComponent<UStaticMeshComponent>(
+				FName("DisplayedActor"), nullptr,
+				actorLocation, FRotator(0, 0, 0), FVector(1.0f),
+				&meshAsset, true);
 
 		mInitialOrbitPivot = FVector(0.0f, 0.0f, boundsExtent.z);
 		mInitialOrbitDistance = FMath::Max(boundsExtent.Length() * 2.5f, 0.5f);

@@ -1,5 +1,7 @@
 ﻿#include "BillboardComponent.h"
 
+#include "Rendering/RenderInfo.h"
+
 IMPLEMENT_CLASS(UBillboardComponent, UPrimitiveComponent);
 
 UBillboardComponent::UBillboardComponent()

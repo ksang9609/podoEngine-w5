@@ -10,10 +10,10 @@ IMPLEMENT_CLASS(UWorld, UObject);
 
 UWorld::~UWorld()
 {
-	for (AActor* removeActor : mActors)
-	{
-		delete removeActor;
-	}
+	//for (AActor* removeActor : mActors)
+	//{
+	//	delete removeActor;
+	//}
 }
 
 void UWorld::SerializeClass(json::JSON& outJson) const
@@ -21,7 +21,7 @@ void UWorld::SerializeClass(json::JSON& outJson) const
 	UObject::SerializeClass(outJson);
 	json::JSON actorsJson = json::JSON::Make(json::JSON::Class::Array);
 
-	for (const AActor* actor : mActors)
+	for (const auto& actor : mActors)
 	{
 		json::JSON actorJson;
 		actor->SerializeClass(actorJson);
@@ -57,16 +57,16 @@ void UWorld::DeserializeClass(const json::JSON& inJson)
 			throw std::runtime_error(std::format("{}: Unknown class name: {}", GetRuntimeClass()->Name, className));
 		}
 		AActor* actor = static_cast<AActor*>(FObjectFactory::LoadObject(classInfo, actorJson));
-		AddActor(actor);
+		AddActor(std::unique_ptr<AActor>(actor));
 	}
 }
 
-void UWorld::AddActor(AActor* actor)
+void UWorld::AddActor(std::unique_ptr<AActor> actor)
 {
 	assert(actor != nullptr);
 	assert(getActorIndex(actor->UUID) == -1);
 
-	mActors.Add(actor);
+	mActors.Add(std::move(actor));
 }
 
 bool UWorld::RemoveActor(uint32 componentUUID)
@@ -92,7 +92,7 @@ void UWorld::Update(float deltaTime)
 {
 	mRenderInfos.Reset(DEFAULT_RESERVE_MEM);
 
-	for (AActor* actor : mActors)
+	for (auto& actor : mActors)
 	{
 		actor->Update(deltaTime, &mRenderInfos);
 	}

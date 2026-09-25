@@ -133,13 +133,13 @@ static FBoundingBox CalculateBounds(
 	{
 		const FVector position = vertices[i].GetPosition();
 
-		result.min.x = min(result.min.x, position.x);
-		result.min.y = min(result.min.y, position.y);
-		result.min.z = min(result.min.z, position.z);
+		result.min.x = std::min(result.min.x, position.x);
+		result.min.y = std::min(result.min.y, position.y);
+		result.min.z = std::min(result.min.z, position.z);
 
-		result.max.x = max(result.max.x, position.x);
-		result.max.y = max(result.max.y, position.y);
-		result.max.z = max(result.max.z, position.z);
+		result.max.x = std::max(result.max.x, position.x);
+		result.max.y = std::max(result.max.y, position.y);
+		result.max.z = std::max(result.max.z, position.z);
 	}
 
 	return result;

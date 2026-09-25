@@ -1,8 +1,10 @@
 ﻿#pragma once
 
-#include "Core/Math/Color.h"
-
 #include <span>
+
+#include "Core/Math/Color.h"
+#include "Rendering/RenderInfo.h"
+
 #include "SceneComponent.h"
 
 class UPrimitiveComponent : public USceneComponent

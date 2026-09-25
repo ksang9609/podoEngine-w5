@@ -1,8 +1,10 @@
 ﻿#include "NameComponent.h"
-#include "Core/IO/JsonUtil.h"
 
 #include <format>
 
+#include "Core/IO/JsonUtil.h"
+#include "Core/Math/Matrix.h"
+#include "Core/Math/Transform.h"
 #include "Engine/Actor.h"
 
 IMPLEMENT_CLASS_WITH_PROPERTIES(UNameComponent, UBillboardComponent);

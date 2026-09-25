@@ -53,26 +53,6 @@ struct FObjectFactory
 	static TObject* LoadObject(const json::JSON& inJson);
 
 
-	/* Spawn Actors */
-	template<typename TComponent, typename... Args>
-		requires(std::derived_from<TComponent, USceneComponent>)
-	static AActor* SpawnActorWithRootComponent(const FName& Name, Args&&... args);
-
-	//static AActor* SpawnPrimitiveActor(EPrimitive primitiveType,
-	//	FVector3 Location, FRotator Rotation, FVector3 Scale
-	//);
-
-	static AActor* SpawnStaticMeshActor(
-		FVector3 location, FRotator rotation, FVector3 scale,
-		const UStaticMesh& staticMeshAsset);
-	static AActor* SpawnStaticMeshActor(
-		FVector3 location, FRotator rotation, FVector3 scale,
-		FName staticMeshAssetName
-	);
-
-
-	static AActor* SpawnParticleActor(FVector3 Location, FRotator Rotation, FVector3 Scale);
-
 	static const FClassInfo* GetClassInfoByName(const FString& className);
 
 	static bool RegisterClassInfo(FString className, const FClassInfo* classInfo);

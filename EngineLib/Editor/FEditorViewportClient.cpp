@@ -413,7 +413,7 @@ void FEditorViewportClient::Update(float deltaTime, const FViewRect& viewRect, F
 			return;
 		}
 		UWorld * CurrentWorld = sceneManager->GetCurrentWorld();
-		CurrentWorld->AddActor(NewActor);
+		CurrentWorld->AddActor(std::unique_ptr<AActor>(NewActor));
 		NewActor->SetName(NewActor->GetName()); // UUID 바뀌었기 때문에 이름 다시 설정
 		NewActor->SetLocation(NewActor->GetTransform().Location + FVector(1.0f, 1.0f, 0.0f)); // 겹치지 않게 위치 변경
 		sceneManager->SetSelectedActor(NewActor); // Select 변경

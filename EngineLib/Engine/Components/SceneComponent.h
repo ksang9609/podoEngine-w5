@@ -5,6 +5,7 @@
 #include <span>
 
 #include "Core/Math/Vector.h"
+#include "Core/Math/FBoundingBox.h"
 #include "Core/Container/TArray.h"
 #include "Core/Object/PropertyInfo.h"
 

@@ -152,34 +152,27 @@ void FEngineLoop::Init(HINSTANCE hInstance, WNDPROC WndProc)
 
 
 	{
-		//mGraphicsManager->CreateStaticMeshBuffer(
-		//	*mAssetManager->FindStaticMeshDataOrNull(BuiltinAssets::Cube)
-		//);
-
-		AActor* cubeActor = FObjectFactory::SpawnStaticMeshActor(
-			FVector(2, 0, 0), FRotator(0, 0, 0), FVector(1, 1, 1),
-			BuiltinAssets::CubeMesh);
-		mSceneManager->GetCurrentWorld()->AddActor(cubeActor);
+		const UStaticMesh& cubeMeshAsset = mAssetManager->FindStaticMeshAssetOrAdd(BuiltinAssets::CubeMesh);
+		mSceneManager->GetCurrentWorld()
+			->SpawnActorWithRootComponent<UStaticMeshComponent>(
+				FName("CubeActor"), mDefaultFontResource.get(),
+				FVector(2, 0, 0), FRotator(0, 0, 0), FVector(1, 1, 1), &cubeMeshAsset);
 	}
 	{
-		//mGraphicsManager->CreateStaticMeshBuffer(
-		//	*mAssetManager->FindStaticMeshDataOrNull(BuiltinAssets::Sphere)
-		//);
-
-		AActor* sphereActor = FObjectFactory::SpawnStaticMeshActor(
-			FVector(-2, 0, 0), FRotator(0, 0, 0), FVector(1, 1, 1),
-			BuiltinAssets::SphereMesh);
-		mSceneManager->GetCurrentWorld()->AddActor(sphereActor);
+		const UStaticMesh& sphereMeshAsset = mAssetManager->FindStaticMeshAssetOrAdd(BuiltinAssets::SphereMesh);
+		mSceneManager->GetCurrentWorld()
+			->SpawnActorWithRootComponent<UStaticMeshComponent>(
+				FName("SphereActor"), mDefaultFontResource.get(),
+				FVector(-2, 0, 0), FRotator(0, 0, 0), FVector(1, 1, 1), &sphereMeshAsset);
 	}
 	{
 		const UStaticMesh& earthMesh = mAssetManager->FindStaticMeshAssetOrAdd(BuiltinAssets::SphereMesh);
-		AActor* earthActor = FObjectFactory::SpawnActorWithRootComponent<USphereComponent>(
-			FName("EarthActor"),
-			FVector(0, 0, 1), FRotator(0, 0, 0), FVector(1, 1, 1),
-			&earthMesh,
-			true
-		);
-		mSceneManager->GetCurrentWorld()->AddActor(earthActor);
+		mSceneManager->GetCurrentWorld()
+			->SpawnActorWithRootComponent<USphereComponent>(
+				FName("EarthActor"), mDefaultFontResource.get(),
+				FVector(0, 0, 1), FRotator(0, 0, 0), FVector(1, 1, 1), &earthMesh,
+				true);
+
 	}
 
 	mEditorUIManager = new FEditorUIManager(ImGui::GetIO());
@@ -551,11 +544,12 @@ void FEngineLoop::processEditorCommand(const FSpawnStaticMeshActorCommand& comma
 {
 	for (int32 i = 0; i < command.SpawnCount; ++i)
 	{
-		AActor* newActor = FObjectFactory::SpawnStaticMeshActor(
-			FVector(0, 0, 0), FRotator(0, 0, 0), FVector(1, 1, 1),
-			command.StaticMeshKey
-		);
-		mSceneManager->GetCurrentWorld()->AddActor(newActor);
+		const UStaticMesh& staticMesh = mAssetManager->FindStaticMeshAssetOrAdd(command.StaticMeshKey);
+		mSceneManager->GetCurrentWorld()
+			->SpawnActorWithRootComponent<UStaticMeshComponent>(
+				FName("StaticMeshActor"), mDefaultFontResource.get(),
+				FVector(0, 0, 0), FRotator(0, 0, 0), FVector(1, 1, 1),
+				&staticMesh);
 	}
 }
 
@@ -570,10 +564,12 @@ void FEngineLoop::processEditorCommand(const FDeleteActorCommand& command)
 
 void FEngineLoop::processEditorCommand(const FSpawnParticleCommand& command)
 {
-	AActor* newActor = FObjectFactory::SpawnParticleActor(
-		FVector(0, 0, 0), FRotator(0, 0, 0), FVector(1, 1, 1)
-	);
-	mSceneManager->GetCurrentWorld()->AddActor(newActor);
+	mSceneManager->GetCurrentWorld()
+		->SpawnActorWithRootComponent<UParticleSubUVComponent>(
+			FName("ParticleActor"), mDefaultFontResource.get(),
+			FVector(0, 0, 0), FRotator(0, 0, 0), FVector(1, 1, 1),
+			6, 6
+		);
 }
 
 void FEngineLoop::processEditorCommand(const FSetActorLocationCommand& command)

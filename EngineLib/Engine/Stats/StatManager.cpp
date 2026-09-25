@@ -122,7 +122,7 @@ void FStatManager::CollectMemory(const FStatCollectionSources& sources)
 	{
 		memory.ActorCount = world->GetActorCount();
 
-		for (const AActor* actor : world->GetActors())
+		for (const auto& actor : world->GetActors())
 		{
 			if (actor != nullptr)
 			{
