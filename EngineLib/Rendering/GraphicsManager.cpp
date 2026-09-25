@@ -394,23 +394,23 @@ void FGraphicsManager::renderStaticMesh(const  TArray<const FRenderInfo*>& rende
 				material = assets.FindMaterialAssetOrNull(BuiltinAssets::DefaultMaterial)->GetMaterial();
 			}
 
-			if (material->DiffuseTexture.DisplayIndex >= 0)
+			if (material->DiffuseTexture.IsValid())
 			{
 				diffuseTexture = resources.FindTextureOrAdd(material->DiffuseTexture);
 			}
-			if (material->NormalTexture.DisplayIndex >= 0)
+			if (material->NormalTexture.IsValid())
 			{
 				normalTexture = resources.FindTextureOrAdd(material->NormalTexture);
 			}
 
-			if (material->SpecularTexture.DisplayIndex >= 0)
+			if (material->SpecularTexture.IsValid())
 			{
 				specularTexture = resources.FindTextureOrAdd(material->SpecularTexture);
 			}
 
 
 			if (!diffuseTexture && HasAllRenderFlags(renderInfo->eRenderFlags, ERenderFlags::RF_Texture) &&
-				renderInfo->TextureName.DisplayIndex >= 0)
+				renderInfo->TextureName.IsValid())
 			{
 				diffuseTexture = resources.FindTextureOrAdd(renderInfo->TextureName);
 			}

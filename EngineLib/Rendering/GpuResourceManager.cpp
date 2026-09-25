@@ -127,7 +127,7 @@ ID3D11ShaderResourceView* FGpuResourceManager::FindTextureOrAdd(FName texturePat
 {
 
 	// 비어 있는 FName("None")은 텍스처 경로가 아니다.
-	if (texturePath.DisplayIndex < 0)
+	if (texturePath.IsNone())
 	{
 		return nullptr;
 	}

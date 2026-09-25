@@ -120,7 +120,7 @@ namespace
 	void SerializeTexturePath(FArchive& archive, FName& texture, const std::filesystem::path& binaryDirectory)
 	{
 		uint8 hasValue =
-			archive.IsSaving() && texture.ComparisonIndex >= 0 ? 1 : 0;
+			archive.IsSaving() && texture.IsValid() ? 1 : 0;
 
 		archive << hasValue;
 
@@ -181,7 +181,7 @@ namespace
 
 	void SerializeName( FArchive& archive, FName& name)
 	{
-		uint8 hasValue = archive.IsSaving() ? static_cast<uint8>(name.ComparisonIndex >= 0) : 0;
+		uint8 hasValue = archive.IsSaving() && name.IsValid() ? 1 : 0;
 
 		archive << hasValue;
 
