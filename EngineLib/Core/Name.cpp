@@ -19,6 +19,12 @@ static constexpr uint32 EntryIdMask = (1 << EntryIdBits) - 1;
 static constexpr uint32 ProbeHashShift = EntryIdBits;
 static constexpr uint32 ProbeHashMask = ~EntryIdMask;
 
+// FNamePoolShardIBit
+static constexpr uint32 FNamePoolShardBits = 8;
+static constexpr uint32 FNamePoolShards = 1U << FNamePoolShardBits;
+constexpr uint32 FNamePoolInitialSlotBits = 8;
+constexpr uint32 FNamePoolInitialSlotsPerShard = 1 << FNamePoolInitialSlotBits;
+
 // Unpacked FNameEntryId to Block and Offset
 struct FNameEntryHandle
 {
@@ -111,6 +117,8 @@ public:
 	}
 
 private:
+	std::mutex Lock;
+
 	uint32 CurrentBlock = 0;
 	uint32 CurrentByteCursor = 0;
 	uint8* Blocks[FNameMaxBlocks] = {};
@@ -120,8 +128,19 @@ private:
 // Hash(uint32) and ProbeHash(uint32)
 struct FNameHash
 {
-	uint32 Hash;
-	uint32 ProbeHash;
+	uint32 ShardIndex;
+	uint32 UnmaskedSlotIndex;
+	uint32 SlotProbeHash;
+
+	static uint32 GetShardIndexFromHiBits(uint32 HiBits)
+	{
+		return HiBits % FNamePoolShards;
+	}
+
+	static uint32 GetShardIndex(uint64 Hash)
+	{
+		return GetShardIndexFromHiBits(static_cast<uint32>(Hash >> 32));
+	}
 
 	static uint64 GenerateHash(const char* Str, size_t Len)
 	{
@@ -134,7 +153,7 @@ struct FNameHash
 	}
 
 	FNameHash()
-		: Hash(0), ProbeHash(0)
+		: ShardIndex(0), UnmaskedSlotIndex(0), SlotProbeHash(0)
 	{
 	}
 
@@ -143,8 +162,9 @@ struct FNameHash
 		uint32 Hi = static_cast<uint32>(InHash >> 32);
 		uint32 Lo = static_cast<uint32>(InHash & 0xFFFFFFFF);
 
-		Hash = Lo;
-		ProbeHash = Hi & ProbeHashMask;
+		ShardIndex = GetShardIndexFromHiBits(Hi);
+		UnmaskedSlotIndex = Lo;
+		SlotProbeHash = (Hi & ProbeHashMask);
 	}
 };
 
@@ -196,6 +216,8 @@ struct FNameDisplayValue : public FNameValue
 	}
 };
 
+// FNamePoolShard
+// Hash bucket sharding
 class FNamePoolShardBase
 {
 public:
@@ -203,14 +225,19 @@ public:
 	{
 		Entries = &InEntries;
 		UsedSlots = 0;
+		Slots = static_cast<FNameSlot*>(calloc(FNamePoolInitialSlotsPerShard, sizeof(FNameSlot)));	
+		CapacityMask = FNamePoolInitialSlotsPerShard - 1;
 	}
 
 	~FNamePoolShardBase()
 	{
-		UsedSlots = 0;
-		CapacityMask = 0;
+		free(Slots);
 		Slots = nullptr;
+		UsedSlots = 0;
+		CapacityMask = 0;		
 	}
+
+	uint32 Capacity() const { return CapacityMask + 1; }
 
 protected:
 	enum { LoadFactorQuotient = 9, LoadFactorDivisor = 10}; // Realloc slots when 90% full
@@ -220,6 +247,140 @@ protected:
 	uint32 CapacityMask = 0;
 	FNameSlot* Slots = nullptr;
 	FNameEntryAllocator* Entries = nullptr;
+};
+
+template<ENameCase Sensitivity>
+class FNamePoolShard : public FNamePoolShardBase
+{
+public:
+	FNameEntryId Find(const FNameValue& InValue) const
+	{
+		std::shared_lock<std::shared_mutex> ReadLock(Lock);
+
+		if (CapacityMask == 0)
+		{
+			return FNameEntryId();
+		}
+		
+		uint32 SlotIndex = InValue.Hash.UnmaskedSlotIndex & CapacityMask;
+
+		// Linear probing
+		while (Slots[SlotIndex].Used())
+		{
+			if (Slots[SlotIndex].GetProbeHash() == InValue.Hash.ProbeHash)
+			{
+				FNameEntryId ExistingId = Slots[SlotIndex].GetId();
+				const FNameEntry& Entry = Entries->Resolve(ExistingId);
+
+				const char* ExistingStr = Entry.GetName();
+				if (Entry.GetNameLength() == InValue.Name.length())
+				{
+					bool bIsMatch = true;
+					if constexpr (Sensitivity == ENameCase::CaseSensitive)
+					{
+						bIsMatch = (std::memcmp(ExistingStr, InValue.Name.data(), InValue.Name.length()) == 0);
+					}
+					else
+					{
+						bIsMatch = (_strnicmp(ExistingStr, InValue.Name.data(), InValue.Name.length()) == 0);
+					}
+
+					if (bIsMatch)
+					{
+						return ExistingId;
+					}
+				}
+			}
+
+			SlotIndex = (SlotIndex + 1) & CapacityMask;
+		}
+
+		return FNameEntryId();
+	}
+
+	FNameEntryId Insert(const FNameValue& InValue, bool& bCreatedNewEntry)
+	{
+		std::unique_lock<std::shared_mutex> WriteLock(Lock);
+		
+		if ((UsedSlots + 1) * LoadFactorDivisor >= (Capacity() * LoadFactorQuotient))
+		{
+			Grow();
+		}
+
+		uint32 SlotIndex = InValue.Hash.UnmaskedSlotIndex & CapacityMask;
+		uint32 Probes = 0;		
+
+		// Linear probing
+		while (Slots[SlotIndex].Used())
+		{			
+			SlotIndex = (SlotIndex + 1) & CapacityMask;
+		}
+
+		Slots[SlotIndex] = FNameSlot(InEntryId, InValue.Hash.ProbeHash);
+
+		bCreatedNewEntry = true;
+		++UsedSlots;
+
+		return InEntryId;
+	}
+
+private:
+	void Grow()
+	{
+		Grow(Capacity() * 2);
+	}
+
+	// Rehashing
+	void Grow(const uint32 NewCapacity)
+	{
+		uint32 OldCapcity = Capacity();
+		uint32 NewCapacityMask = NewCapacity - 1;
+
+		FNameSlot* NewSlots = static_cast<FNameSlot*>(std::calloc(NewCapacity, sizeof(FNameSlot)));
+
+		for (uint32 i = 0; i < OldCapcity; ++i)
+		{
+			FNameSlot OldSlot = Slots[i];
+
+			if (OldSlot.Used())
+			{
+				const FNameEntry& Entry = Entries->Resolve(OldSlot.GetId());
+				const char* EntryName = Entry.GetName();
+				size_t Len = std::min(static_cast<size_t>(Entry.GetNameLength()), size_t(NAME_SIZE - 1));
+				FNameHash HashValue;
+
+				if constexpr (Sensitivity == ENameCase::IgnoreCase)
+				{
+					// Stack buffer
+					char LowerBuffer[NAME_SIZE];					
+
+					for (size_t c = 0; c < Len; ++c)
+					{
+						LowerBuffer[c] = static_cast<char>(std::tolower(EntryName[c]));
+					}
+
+					HashValue = FNameHash(LowerBuffer, static_cast<int32>(Len));
+				}
+				else
+				{
+					HashValue = FNameHash(EntryName, Len);
+				}
+
+				uint32 SlotIndex = HashValue.UnmaskedSlotIndex & NewCapacityMask;
+
+				// Linear probing
+				while (NewSlots[SlotIndex].Used())
+				{
+					SlotIndex = (SlotIndex + 1) & NewCapacityMask;
+				}
+				NewSlots[SlotIndex] = OldSlot;
+			}
+		}
+		
+		free(Slots);
+		Slots = NewSlots;
+		CapacityMask = NewCapacityMask;
+	}
 };
 
 // FNamePool
@@ -248,7 +409,7 @@ public:
 
 		// Display
 		FNameDisplayValue DisplayValue(NameString);
-		FNameEntryId Existing = FNamePool::FindValue(DisplayHashBuckets, DisplayValue, true);
+		FNameEntryId Existing = DisplayShards[DisplayValue.Hash.ShardIndex].Find(DisplayValue);
 		if (Existing.ToUnstableInt() != 0)
 		{
 			return Existing;
@@ -256,8 +417,7 @@ public:
 
 		// Comparison
 		FNameComparisonValue ComparisonValue(NameString);
-
-		return FNamePool::FindValue(ComparisonHashBuckets, ComparisonValue, false);
+		return ComparisonShards[ComparisonValue.Hash.ShardIndex].Find(ComparisonValue);
 	}
 	FNameEntryId Store(std::string_view NameString)
 	{
@@ -274,7 +434,7 @@ public:
 		}
 
 		FNameDisplayValue DisplayValue(NameString);
-		FNameEntryId Existing = FNamePool::FindValue(DisplayHashBuckets, DisplayValue, true);
+		FNameEntryId Existing = DisplayShards[DisplayValue.Hash.ShardIndex].Find(DisplayValue);
 		if (Existing.ToUnstableInt() != 0)
 		{
 			return Existing;
@@ -282,7 +442,7 @@ public:
 
 		bool bAdded = false;
 		FNameComparisonValue ComparisonValue(NameString);
-		FNameEntryId ComparisonId = StoreComparisonValue(ComparisonValue, bAdded);
+		FNameEntryId ComparisonId = ComparisonShards[ComparisonValue.Hash.ShardIndex].Insert(ComparisonValue, bAdded);
 
 		return StoreDisplayValue(DisplayValue, ComparisonId, bAdded);
 	}
@@ -294,132 +454,22 @@ public:
 private:
 	FNamePool()
 	{
-		Initialize(1 << 20);
-	}
-
-	void Initialize(uint32 InitialCapacity)
-	{
-		ComparisonHashBuckets.Init(FNameSlot(), InitialCapacity);
-		DisplayHashBuckets.Init(FNameSlot(), InitialCapacity);
-	}
-
-	FNameEntryId FindValue(const TArray<FNameSlot>& Buckets, const FNameValue& InValue, bool bIsCaseSensitive) const
-	{
-		uint32 CapacityMask = static_cast<uint32>(Buckets.Num() - 1);
-		uint32 SlotIndex = InValue.Hash.Hash & CapacityMask;
-
-		while (Buckets[SlotIndex].Used())
+		// Shard
+		for (FNamePoolShardBase& Shard : ComparisonShards)
 		{
-			if (Buckets[SlotIndex].GetProbeHash() == InValue.Hash.ProbeHash)
-			{
-				FNameEntryId ExistingId = Buckets[SlotIndex].GetId();
-				const FNameEntry& Entry = Resolve(ExistingId);
-
-				const char* ExistingStr = Entry.GetName();
-				if (Entry.GetNameLength() == InValue.Name.length())
-				{
-					bool bIsMatch = true;
-					if (bIsCaseSensitive)
-					{
-						bIsMatch = (std::memcmp(ExistingStr, InValue.Name.data(), InValue.Name.length()) == 0);
-					}
-					else
-					{
-						bIsMatch = (_strnicmp(ExistingStr, InValue.Name.data(), InValue.Name.length()) == 0);
-					}
-
-					if (bIsMatch)
-					{
-						return ExistingId;
-					}
-				}
-			}
-
-			SlotIndex = (SlotIndex + 1) & CapacityMask;
+			Shard.Initialize(Entries);
 		}
-
-
-		return FNameEntryId();
-	}
-
-	FNameEntryId StoreValue(TArray<FNameSlot>& Buckets, const FNameValue& InValue, bool bIsCaseSensitive)
-	{
-		FNameEntryId ExistingId = FNamePool::FindValue(Buckets, InValue, bIsCaseSensitive);
-		if (ExistingId.ToUnstableInt() != 0)
+		for (FNamePoolShardBase& Shard : DisplayShards)
 		{
-			return ExistingId;
+			Shard.Initialize(Entries);
 		}
-
-		// Write Memory
-		uint32 NeededByte = static_cast<uint32>(sizeof(FNameEntryHeader) + InValue.Name.length() + 1); // 1 : null terminator
-		FNameEntryHandle NewHandle = Entries.Allocate(NeededByte);
-
-		// Set header
-		FNameEntry& NewEntry = Entries.Resolve(NewHandle);
-		uint16* HeaderPtr = reinterpret_cast<uint16*>(&NewEntry);
-		*HeaderPtr = static_cast<uint16>(InValue.Name.length()) << 1;
-		// Set string
-		char* DataPtr = const_cast<char*>(NewEntry.GetName());
-		std::memcpy(DataPtr, InValue.Name.data(), InValue.Name.length());
-		DataPtr[InValue.Name.length()] = '\0'; // null terminator
-
-		uint32 CapacityMask = static_cast<uint32>(Buckets.Num() - 1);
-		uint32 SlotIndex = InValue.Hash.Hash & CapacityMask;
-		uint32 Probes = 0;
-		const uint32 MaxProbes = static_cast<uint32>(Buckets.Num());
-
-		while (Buckets[SlotIndex].Used())
-		{
-			if (++Probes >= MaxProbes)
-			{
-				assert(false && "FNamePool out of memory!");
-				std::abort();
-			}
-
-			SlotIndex = (SlotIndex + 1) & CapacityMask;
-		}
-
-		Buckets[SlotIndex] = FNameSlot(NewHandle, InValue.Hash.ProbeHash);
-
-		return NewHandle;
-	}
-
-	FNameEntryId StoreComparisonValue(const FNameValue& InValue, bool& bOutAdded)
-	{
-		FNameEntryId ExistingId = FNamePool::FindValue(ComparisonHashBuckets, InValue, false);
-		if (ExistingId.ToUnstableInt() != 0)
-		{
-			return ExistingId;
-		}
-
-		bOutAdded = true;
-
-		// Write Memory
-		uint32 NeededByte = static_cast<uint32>(sizeof(FNameEntry) + InValue.Name.length() + 1); // 1 : null terminator
-		FNameEntryHandle NewHandle = Entries.Allocate(NeededByte);
-
-		// Set header
-		FNameEntry& NewEntry = Entries.Resolve(NewHandle);
-		uint16* HeaderPtr = reinterpret_cast<uint16*>(&NewEntry);
-		*HeaderPtr = static_cast<uint16>(InValue.Name.length()) << 1;
-		// Set string
-		char* DataPtr = const_cast<char*>(NewEntry.GetName());
-		std::memcpy(DataPtr, InValue.Name.data(), InValue.Name.length());
-		DataPtr[InValue.Name.length()] = '\0'; // null terminator
-
-		NewEntry.SetComparisonId(NewHandle);
-
-		InsertSlot(ComparisonHashBuckets, InValue, NewHandle);
-
-		return NewHandle;
 	}
 
 	FNameEntryId StoreDisplayValue(const FNameValue& InValue, FNameEntryId InComparisonId, bool bWasAdded)
 	{
 		if (bWasAdded)
-		{
-			InsertSlot(DisplayHashBuckets, InValue, InComparisonId);
-			return InComparisonId;
+		{			
+			return DisplayShards[InValue.Hash.ShardIndex].Insert(InValue, bWasAdded);
 		}
 
 		// Write Memory
@@ -437,36 +487,14 @@ private:
 
 		NewEntry.SetComparisonId(InComparisonId);
 
-		InsertSlot(DisplayHashBuckets, InValue, NewHandle);
-
+		DisplayShards[InValue.Hash.ShardIndex].Insert(InValue, bWasAdded);
+	
 		return NewHandle;
 	}
 
-	void InsertSlot(TArray<FNameSlot>& Buckets, const FNameValue& InValue, FNameEntryId InEntryId)
-	{
-		uint32 CapacityMask = static_cast<uint32>(Buckets.Num() - 1);
-		uint32 SlotIndex = InValue.Hash.Hash & CapacityMask;
-		uint32 Probes = 0;
-		const uint32 MaxProbes = static_cast<uint32>(Buckets.Num());
-
-		while (Buckets[SlotIndex].Used())
-		{
-			if (++Probes >= MaxProbes)
-			{
-				assert(false && "FNamePool out of memory!");
-				std::abort();
-			}
-
-			SlotIndex = (SlotIndex + 1) & CapacityMask;
-		}
-
-		Buckets[SlotIndex] = FNameSlot(InEntryId, InValue.Hash.ProbeHash);
-	}
-
 	FNameEntryAllocator Entries;
-
-	TArray<FNameSlot> ComparisonHashBuckets;
-	TArray<FNameSlot> DisplayHashBuckets;
+	FNamePoolShard<ENameCase::CaseSensitive> DisplayShards[FNamePoolShards];
+	FNamePoolShard<ENameCase::IgnoreCase> ComparisonShards[FNamePoolShards];
 };
 
 FName::FName(std::string_view str)
