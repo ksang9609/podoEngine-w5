@@ -16,6 +16,7 @@
 class AActor;
 class FSceneManager;
 class FOctree;
+class FWorldBVH;
 struct FViewportSharedSettings;
 
 struct FPickCandidate {
@@ -38,7 +39,7 @@ public:
 	}
 
 	void Initialize(FAssetManager& assetManagerRef);
-	void RayCast(const FViewRect& viewrect, const TArray<const FRenderInfo*>& renderInfos, bool bCheckObject, const FOctree& octree);
+	void RayCast(const FViewRect& viewrect, const TArray<const FRenderInfo*>& renderInfos, bool bCheckObject, const FOctree& octree, const FWorldBVH& worldBVH);
 	float GetFov() const { return mCamera.mFovDegree; }
 	void Update(float deltaTime, const FViewRect& viewrect, FSceneManager* sceneManager, bool bViewportHoverd, bool bViewportFocused);
 	bool IsMouseHit() const { return bMouseHit; }
@@ -77,6 +78,7 @@ private:
 
 	static constexpr uint32 InvalidObjectIndex = UINT32_MAX;
 	uint32 mHoveredObjectIndex = InvalidObjectIndex;
+	int32 mLastPickCandidateCount = -1;   
 
 	// 선택된 액터의 RenderInfo는 캐시하지 않는다. 필요할 때 ClickedActor->GetRenderInfos()로 그때그때 뽑는다.
 	//마우스 밑 무언가가 Actor이면 저장. RayCast 에서 채워야 함 (아직 미구현)

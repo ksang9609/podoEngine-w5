@@ -77,3 +77,49 @@ private:
 		const TArray<uint32>& indices);
 };
 
+
+
+// --------------------------
+// 월드 공간 오브젝트 BVH 
+// --------------------------
+
+struct FRenderInfo;
+
+struct FWorldBVHNode
+{
+	FBoundingBox Bounds;
+	int32 LeftChildIndex = -1;
+	int32 RightChildIndex = -1;
+
+	int32 First = -1;   // -1: 내부 노드
+	int32 Count = 0;
+
+	bool IsLeaf() const { return First >= 0; }
+};
+
+struct FWorldBVHBuildObject
+{
+	FBoundingBox Bounds;
+	FVector Center;
+	uint32 ObjectIndex;
+};
+
+class FWorldBVH
+{
+public:
+	void Build(const TArray<const FRenderInfo*>& renderInfos, uint32 maxLeafSize = 4);
+
+	void Raycast(const FVector& start, const FVector& end, TArray<uint32>& outCandidates) const;
+
+	void Clear();
+	bool IsEmpty() const { return mNodes.IsEmpty(); }
+
+	int32 GetNodeCount() const { return mNodes.Num(); }
+
+private:
+	int32 buildNode(TArray<FWorldBVHBuildObject>& objects, uint32 first, uint32 count, uint32 maxLeafSize);
+	void traverseNode(int32 nodeIndex, const FVector& start, const FVector& end, TArray<uint32>& outCandidates) const;
+
+	TArray<FWorldBVHNode> mNodes;
+	TArray<uint32> mObjectOrder;
+};

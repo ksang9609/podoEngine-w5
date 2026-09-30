@@ -37,6 +37,9 @@ public:
 	uint32 GetMaxNodeObjectCount() const;	
 	float GetRootHalfSize() const { return mRootHalfSize; }
 
+	const TArray<uint32>& GetStrayObjects() const { return mOutsideObjects; }
+	bool IsStale(uint32 objectIndex) const { return objectIndex < static_cast<uint32>(mStaleFlags.Num()) && mStaleFlags[objectIndex] != 0; }
+
 
 public:
 	void FrustumCull(const FFrustum & frustum, const FVector & cameraPos, TArray<uint32> & outInside, TArray<uint32>& outIntersect) const;

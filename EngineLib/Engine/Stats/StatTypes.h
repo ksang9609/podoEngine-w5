@@ -8,6 +8,7 @@ enum class EStatGroup : uint8
 	FPS = 1 << 0,
 	Memory = 1 << 1,
 	Picking = 1 << 2,
+	All = ~0u
 };
 
 constexpr uint8 toStatMask(EStatGroup group)

@@ -167,7 +167,8 @@ bool FEditorFileUtils::ConvertLegacySceneToNewFormat()
 	}
 	std::filesystem::path normalizedPath = std::filesystem::absolute(filePath.CStr()).lexically_normal();
 	FString normalizedScenePath(normalizedPath.string());
-	FString newFilePath = normalizedScenePath.Replace(std::string_view(".scene"), std::string_view("_converted.Scene"));
+	FString newFilePath = normalizedScenePath;
+	newFilePath.Append(std::string_view("_converted.Scene"));
 
 	std::string errorMessage;
 

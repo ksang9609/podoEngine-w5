@@ -275,6 +275,10 @@ void ConsoleWindow::ExecuteCommand(const char* Input, FEditorCommands& outComman
 		{
 			outCommands.Emplace(FToggleStatCommand{ EStatGroup::Picking });
 		}
+		else if (argument == "all")
+		{
+			outCommands.Emplace(FToggleStatCommand{ EStatGroup::All });
+		}
 		else if (argument == "clear")
 		{
 			outCommands.Emplace(FClearPickingDataCommand{});
@@ -328,6 +332,8 @@ void ConsoleWindow::ExecuteCommand(const char* Input, FEditorCommands& outComman
 			"*** KSH KHW CHS LJY ***\n"
 			"******* WEEK  4 *******\n"
 			"*** HDY KHJ LGH KSH ***\n"
+			"******* WEEK  5 *******\n"
+			"*** YHJ KSH HSM JYH ***\n"
 			"***********************\n");
 
 	}

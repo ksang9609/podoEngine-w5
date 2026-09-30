@@ -33,14 +33,14 @@ public:
 	using iterator = std::string::iterator;
 	using const_iterator = std::string::const_iterator;
 
-	iterator begin() { return mData->begin(); }
-	const_iterator begin() const { return mData->begin(); }
+	iterator begin() { return mData.begin(); }
+	const_iterator begin() const { return mData.begin(); }
 
-	iterator end() { return mData->end(); }
-	const_iterator end() const { return mData->end(); }
+	iterator end() { return mData.end(); }
+	const_iterator end() const { return mData.end(); }
 
-	inline operator std::string() const { return *mData; }
-	inline operator std::string_view() const { return *mData; }
+	inline operator std::string() const { return mData; }
+	inline operator std::string_view() const { return mData; }
 
 	FString& Append(std::string_view str);
 	FString& Append(const FString& str);
@@ -119,11 +119,11 @@ public:
 
 	bool operator== (const FString& str) const;
 
-	bool IsEmpty() const { return mData->empty(); }
+	bool IsEmpty() const { return mData.empty(); }
 
 
 private:
-	std::unique_ptr<std::string> mData;
+	std::string mData;
 };
 
 template<>

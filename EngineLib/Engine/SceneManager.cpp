@@ -67,6 +67,8 @@ void FSceneManager::Update(float deltaTime)
 			mOctree.Build(GetRenderInfos());
 		}
 
+		mWorldBVH.Build(GetRenderInfos());
+
 		// ---------------------------
 		//		임시용(삭제 필요)
 		// ---------------------------
@@ -251,6 +253,25 @@ float FSceneManager::GetPanelWidth() const
 void FSceneManager::NotifyObjectMoved(uint32 objectIndex)
 {
 	mOctree.MarkObjectMoved(objectIndex);
+}
+
+void FSceneManager::NotifySelectedActorMoved()
+{
+	if (mSelectedActor == nullptr)
+	{
+		return;
+	}
+
+	const uint32 actorIndex = mSelectedActor->InternalIndex;
+	const TArray<const FRenderInfo*>& renderInfos = GetRenderInfos();
+
+	for (int32 i = 0; i < renderInfos.Num(); ++i)
+	{
+		if (renderInfos[i]->ObejctID.InternalIndex == actorIndex)
+		{
+			mOctree.MarkObjectMoved(static_cast<uint32>(i));
+		}
+	}
 }
 
 void FSceneManager::FinishObjectMove()

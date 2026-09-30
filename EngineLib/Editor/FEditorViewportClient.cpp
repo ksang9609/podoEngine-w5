@@ -61,7 +61,7 @@ void FEditorViewportClient::Initialize(FAssetManager& assetManagerRef)
 	mGizmo.Reset();	
 }
 
-void FEditorViewportClient::RayCast(const FViewRect& viewrect, const TArray<const FRenderInfo*>& renderInfos, bool bCheckObject, const FOctree& octree)
+void FEditorViewportClient::RayCast(const FViewRect& viewrect, const TArray<const FRenderInfo*>& renderInfos, bool bCheckObject, const FOctree& octree, const FWorldBVH& worldBVH)
 {
 	assert(mAssetManagerRef != nullptr);
 
@@ -118,7 +118,27 @@ void FEditorViewportClient::RayCast(const FViewRect& viewrect, const TArray<cons
 	FScopeCycleCounter cycleCounter({ EStatId::Picking });
 
 	TArray<uint32> candidates;
-	octree.Raycast(NearPoint, FarPoint - NearPoint, candidates);
+	//octree.Raycast(NearPoint, FarPoint - NearPoint, candidates);
+	worldBVH.Raycast(NearPoint, FarPoint, candidates);
+
+	{
+		int32 writeIndex = 0;
+		for (int32 i = 0; i < candidates.Num(); ++i)
+		{
+			if (!octree.IsStale(candidates[i]))
+			{
+				candidates[writeIndex++] = candidates[i];
+			}
+		}
+		candidates.SetNum(writeIndex);
+
+		for (uint32 strayIndex : octree.GetStrayObjects())
+		{
+			candidates.Add(strayIndex);
+		}
+	}
+
+	mLastPickCandidateCount = candidates.Num();
 
 	TArray<FPickCandidate> Hits;
 
@@ -361,7 +381,12 @@ void FEditorViewportClient::Update(float deltaTime, const FViewRect& viewRect, F
 
 	const bool bLeftClicked = bViewportHovered && Input.WasPressed(VK_LBUTTON);
 
-	RayCast(viewRect, sceneManager->GetRenderInfos(), bLeftClicked, sceneManager->GetOctree());
+	RayCast(viewRect, sceneManager->GetRenderInfos(), bLeftClicked, sceneManager->GetOctree(), sceneManager->GetWorldBVH());
+	if (bLeftClicked && mLastPickCandidateCount >= 0)
+	{
+		UE_LOG_F(Warning, Core, "Picking broadphase candidates={}", mLastPickCandidateCount);
+		mLastPickCandidateCount = -1;
+	}
 
 	////Editor Click 처리
 	//if (mClickedActor)
@@ -478,10 +503,7 @@ void FEditorViewportClient::Update(float deltaTime, const FViewRect& viewRect, F
 	//Gizmo 축을 클릭한 상태로 마우스 이동이 있으면 해당 축 방향으로 ClickedActor을 변형한다.
 	if (mGizmo.mDraggingAxis != EGIZMO_AXIS::NONE && sceneManager->IsActorSelected())
 	{
-		if (mHoveredObjectIndex != InvalidObjectIndex)
-		{
-			sceneManager->NotifyObjectMoved(mHoveredObjectIndex);
-		}
+		sceneManager->NotifySelectedActorMoved();
 		if (mGizmo.eType == EGIZMO_TYPE::TRANSLATE)
 		{
 			// 절대 좌표가 아니라 시작 시점 대비 변위. 축 직선도 시작 시점에 고정돼 있다

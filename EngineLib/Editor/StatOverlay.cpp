@@ -94,12 +94,13 @@ namespace
 
 	void DrawPicking(const FRect& rect, const FPickingStatSnapshot& picking, ImDrawList& drawList)
 	{
-		char lines[4][64];
+		char lines[5][64];
 		int lineCount = 0;
 		std::snprintf(lines[lineCount++], 64, "Picking");
 		std::snprintf(lines[lineCount++], 64, "Count: %u", picking.PickingCount);
 		std::snprintf(lines[lineCount++], 64, "Last Time: %.3f ms", picking.LastPickTimeMs);
 		std::snprintf(lines[lineCount++], 64, "Total Time: %.3f ms", picking.TotalPickTimeMs);
+		std::snprintf(lines[lineCount++], 64, "Average Time: %.3f ms", picking.PickingCount > 0 ? picking.TotalPickTimeMs / picking.PickingCount : 0.0);
 		float width = 0.0f;
 		const float lineHeight = ImGui::GetTextLineHeight();
 		for (int index = 0; index < lineCount; ++index)
@@ -124,6 +125,8 @@ void StatOverlay::Draw(const FRect& imageRect, const FStatManager& statManager, 
 		return;
 	}
 
+	ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.5f);
+
 	const FStatSnapshot& snapshot = statManager.GetSnapshot();
 	FRect pickingRect = imageRect;
 
@@ -136,7 +139,7 @@ void StatOverlay::Draw(const FRect& imageRect, const FStatManager& statManager, 
 	if (statManager.IsEnabled(EStatGroup::Memory))
 	{
 		DrawMemory(imageRect, snapshot.Memory, drawList);
-		pickingRect.Top += 200.0f; // Memory 아래에 위치하도록 조정
+		pickingRect.Top += 300.0f; // Memory 아래에 위치하도록 조정
 	}
 
 	if (statManager.IsEnabled(EStatGroup::Picking))
@@ -145,4 +148,5 @@ void StatOverlay::Draw(const FRect& imageRect, const FStatManager& statManager, 
 	}
 
 	drawList.PopClipRect();
+	ImGui::PopFont();
 }
