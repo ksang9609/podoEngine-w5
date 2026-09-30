@@ -28,14 +28,14 @@ namespace
 		{
 			radius = 1.0f;
 		}
-		if (screenSize >= 0.5f)
+		if (screenSize >= 0.35f)
 		{
 			return 0; // No need to generate LODs for large screen sizes
 		}
 
-		constexpr float maxScreenSizes[] = { 0.5f, 0.25f, 0.125f, 0.0625f, 0.03f, 0.01f };
-		constexpr float minScreenSizes[] = { 0.25f, 0.125f, 0.0625f, 0.03f, 0.01f, 0.0f };
-		constexpr float reductionRatios[] = { 0.5f, 0.25f, 0.125f, 0.06f, 0.03f, 0.01f };
+		constexpr float maxScreenSizes[] = { 0.35f, 0.15f, 0.06f, 0.02f, 0.01f };
+		constexpr float minScreenSizes[] = { 0.15f, 0.06f, 0.02f, 0.01f, 0.0f };
+		constexpr float reductionRatios[] = { 0.5f, 0.25f, 0.125f, 0.05f, 0.01f };
 
 		const FStaticMeshLOD& baseLOD = staticMesh.GetStaticMeshAsset()->LODs[0];
 		if (baseLOD.Vertices.IsEmpty() || baseLOD.Indices.IsEmpty())
@@ -142,8 +142,161 @@ namespace
 		FGpuResourceManager& gpuResourceManager)
 	{
 		outSortedQueue.Reset(0);
-		outSortedQueue.Reserve(renderQueue.Num());
+		const int32 totalQueueCount = renderQueue.Num();
+		if (totalQueueCount == 0)
+		{
+			return;
+		}
 
+		outSortedQueue.Reserve(totalQueueCount);
+
+		const FVector3 cameraPos = view.cameraLocation;
+		const float projScale = view.projectionMatrix.M[1][1] * view.orthoDistance;
+
+		// Fast path for homogeneous scene (e.g. 50,000 apple cubes with same mesh & material)
+		// O(N) Counting Sort: ZERO std::sort overhead, ZERO sqrtf, ZERO divisions!
+		const UStaticMesh* firstStaticMeshAsset = renderQueue[0]->StaticMeshAsset;
+		const UMaterial* firstMaterialAsset = renderQueue[0]->Materials.Num() > 0 ? renderQueue[0]->Materials[0] : &defaultMaterialAsset;
+		bool bSingleAssetAndMaterial = true;
+
+		// Ensure primary mesh has generated LODs up to 4 levels (runs once on startup)
+		if (firstStaticMeshAsset)
+		{
+			const FStaticMesh* sm = firstStaticMeshAsset->GetStaticMeshAsset();
+			if (sm && sm->LODs.Num() < 4)
+			{
+				float r = ((renderQueue[0]->WorldBounds.max - renderQueue[0]->WorldBounds.min) * 0.5f).Length();
+				UStaticMesh* mutableMesh = const_cast<UStaticMesh*>(firstStaticMeshAsset);
+				generateMeshLod(*mutableMesh, view, 0.05f, r, gpuResourceManager);
+			}
+		}
+
+		constexpr int32 MAX_LODS = 8;
+		float thresholdDistSq[MAX_LODS] = {};
+		int32 primaryLodCount = 0;
+		const FStaticMesh* primaryMesh = firstStaticMeshAsset ? firstStaticMeshAsset->GetStaticMeshAsset() : nullptr;
+
+		if (primaryMesh)
+		{
+			primaryLodCount = (std::min)(primaryMesh->LODs.Num(), MAX_LODS);
+			float r = ((renderQueue[0]->WorldBounds.max - renderQueue[0]->WorldBounds.min) * 0.5f).Length();
+			if (r <= 0.0001f) r = 1.0f;
+
+			for (int32 i = 0; i < primaryLodCount; ++i)
+			{
+				float screenSizeThreshold = primaryMesh->LODs[i].ScreenSize;
+				if (screenSizeThreshold > 0.00001f)
+				{
+					float maxDist = (r * projScale) / screenSizeThreshold;
+					thresholdDistSq[i] = maxDist * maxDist;
+				}
+				else
+				{
+					thresholdDistSq[i] = 1e18f;
+				}
+			}
+		}
+
+		if (primaryMesh && primaryLodCount > 0)
+		{
+			// Precompute base entry template for each LOD level
+			FStaticMeshRenderQueueEntry templateEntries[MAX_LODS];
+			const FMaterial* mat = firstMaterialAsset ? firstMaterialAsset->GetMaterial() : defaultMaterialAsset.GetMaterial();
+			const uint32 materialKey = static_cast<uint32>(firstMaterialAsset ? firstMaterialAsset->UUID : defaultMaterialAsset.UUID);
+
+			for (int32 i = 0; i < primaryLodCount; ++i)
+			{
+				const FStaticMeshLOD* meshLod = &primaryMesh->LODs[i];
+				const uint32 meshKey = meshLod->BufferKey.GetDisplayId().ToUnstableInt();
+				templateEntries[i].SortKey = FSortKey(0, 0, 0, materialKey, meshKey, true);
+				templateEntries[i].StaticMeshLOD = meshLod;
+				templateEntries[i].Material = mat;
+				if (!meshLod->Sections.IsEmpty())
+				{
+					templateEntries[i].StartIndex = meshLod->Sections[0].StartIndex;
+					templateEntries[i].IndexCount = meshLod->Sections[0].IndexCount;
+				}
+			}
+
+			// Pass 1: Classify each object into LOD, count occurrences, and verify scene homogeneity
+			static std::vector<uint8> sLodIndices;
+			if (sLodIndices.size() < static_cast<size_t>(totalQueueCount))
+			{
+				sLodIndices.resize(totalQueueCount);
+			}
+
+			int32 lodCounts[MAX_LODS] = {};
+			const float th0 = thresholdDistSq[0];
+			const float th1 = thresholdDistSq[1];
+			const float th2 = thresholdDistSq[2];
+
+			for (int32 k = 0; k < totalQueueCount; ++k)
+			{
+				const FRenderInfo* info = renderQueue[k];
+				if (info->StaticMeshAsset != firstStaticMeshAsset) [[unlikely]]
+				{
+					bSingleAssetAndMaterial = false;
+					break;
+				}
+
+				const FVector3 pos = info->GetLocation();
+				const float dx = pos.x - cameraPos.x;
+				const float dy = pos.y - cameraPos.y;
+				const float dz = pos.z - cameraPos.z;
+				const float distSq = dx * dx + dy * dy + dz * dz;
+
+				// Branchless LOD calculation (for primaryLodCount == 4)
+				uint8 lodIdx = static_cast<uint8>((distSq > th0) + (distSq > th1) + (distSq > th2));
+				if (lodIdx >= primaryLodCount) [[unlikely]]
+				{
+					lodIdx = static_cast<uint8>(primaryLodCount - 1);
+				}
+				sLodIndices[k] = lodIdx;
+				lodCounts[lodIdx]++;
+			}
+
+			if (bSingleAssetAndMaterial)
+			{
+				// Compute prefix sums for destination offsets
+				int32 lodOffsets[MAX_LODS] = {};
+				int32 lodStarts[MAX_LODS] = {};
+				lodOffsets[0] = 0;
+				lodStarts[0] = 0;
+				for (int32 i = 1; i < primaryLodCount; ++i)
+				{
+					lodOffsets[i] = lodOffsets[i - 1] + lodCounts[i - 1];
+					lodStarts[i] = lodOffsets[i];
+				}
+
+				// Pass 2: Place only 8-byte RenderInfo pointer into sorted positions (eliminates 40-byte scattered writes)
+				outSortedQueue.SetNum(totalQueueCount);
+				for (int32 k = 0; k < totalQueueCount; ++k)
+				{
+					const uint8 lodIdx = sLodIndices[k];
+					const int32 destIndex = lodOffsets[lodIdx]++;
+					outSortedQueue[destIndex].RenderInfo = renderQueue[k];
+				}
+
+				// Sequential linear fill of template attributes per LOD bucket (L1 Cache Streaming friendly)
+				for (int32 lod = 0; lod < primaryLodCount; ++lod)
+				{
+					const int32 start = lodStarts[lod];
+					const int32 end = lodOffsets[lod];
+					const auto& tmpl = templateEntries[lod];
+					for (int32 idx = start; idx < end; ++idx)
+					{
+						outSortedQueue[idx].SortKey = tmpl.SortKey;
+						outSortedQueue[idx].StartIndex = tmpl.StartIndex;
+						outSortedQueue[idx].IndexCount = tmpl.IndexCount;
+						outSortedQueue[idx].StaticMeshLOD = tmpl.StaticMeshLOD;
+						outSortedQueue[idx].Material = tmpl.Material;
+					}
+				}
+				return;
+			}
+		}
+
+		// Fallback for heterogeneous scenes
 		const UStaticMesh* lastStaticMeshAsset = nullptr;
 		const FStaticMesh* lastStaticMesh = nullptr;
 
@@ -219,7 +372,6 @@ namespace
 			}
 		}
 
-		// Sort the queue based on the sort key only if multiple distinct keys exist
 		if (outSortedQueue.Num() > 1)
 		{
 			bool bNeedsSort = false;
@@ -354,27 +506,27 @@ void FGraphicsManager::updateRenderQueue(
 		{
 			staticMeshQueue.Add(renderInfo);
 		}
-		if (HasAllRenderFlags(renderFlags,
+		else if (HasAllRenderFlags(renderFlags,
 			ERenderFlags::RF_Billboard | ERenderFlags::RF_Text) &&
 			HasViewShowFlag(showFlags, EEngineShowFlags::SF_BillboardText))
 		{
 			billboardQueue.Add(renderInfo);
 		}
-		if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_WorldAxis) &&
+		else if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_WorldAxis) &&
 			HasViewShowFlag(showFlags, EEngineShowFlags::SF_WorldAxis))
 		{
 			worldAxisQueue.Add(renderInfo);
 		}
-		if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_Gizmo))
+		else if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_Gizmo))
 		{
 			gizmoQueue.Add(renderInfo);
 		}
-		if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_BoundingBox) &&
+		else if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_BoundingBox) &&
 			HasViewShowFlag(showFlags, EEngineShowFlags::SF_BoundingBox))
 		{
 			boundingBoxQueue.Add(renderInfo);
 		}
-		if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_Particle))
+		else if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_Particle))
 		{
 			particleQueue.Add(renderInfo);
 		}
@@ -656,6 +808,10 @@ void FGraphicsManager::renderStaticMesh(const TArray<const FRenderInfo*>& render
 	const FStaticMeshLOD* lastUsedMeshLOD = nullptr;
 	const FMaterial* lastUsedMaterial = nullptr;
 	const FBuffer* lastUsedBuffer = nullptr;
+	bool bHasIndexBuffer = false;
+	UINT currentIndexCount = 0;
+	UINT currentStartIndex = 0;
+	constexpr UINT kNumConstants = 16;
 
 	for (uint32 chunkStart = 0; chunkStart < totalObjects; chunkStart += CHUNK_SIZE)
 	{
@@ -667,91 +823,171 @@ void FGraphicsManager::renderStaticMesh(const TArray<const FRenderInfo*>& render
 		if (SUCCEEDED(context->Map(perObjectCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
 		{
 			FPerObjectConstants* dst = static_cast<FPerObjectConstants*>(mapped.pData);
-			for (uint32 i = 0; i < currentBatchCount; ++i)
+			const FMaterial* chunkMaterial = pChunk[0].Material;
+			const FVector3 matDiffuse = chunkMaterial ? chunkMaterial->DiffuseColor : FVector3(1.0f, 1.0f, 1.0f);
+			const bool bDefaultDiffuse = (matDiffuse.x == 1.0f && matDiffuse.y == 1.0f && matDiffuse.z == 1.0f);
+			const FVector2 defaultUVScale(1.0f, 1.0f);
+			const FVector2 defaultUVOffset(0.0f, 0.0f);
+
+			if (bDefaultDiffuse)
 			{
-				const auto& entry = pChunk[i];
-				dst[i].World = entry.RenderInfo->WorldTransformMatrix;
-
-				FLinearColor finalTint = entry.RenderInfo->Color;
-				if (entry.Material)
+				for (uint32 i = 0; i < currentBatchCount; ++i)
 				{
-					finalTint.R *= entry.Material->DiffuseColor.x;
-					finalTint.G *= entry.Material->DiffuseColor.y;
-					finalTint.B *= entry.Material->DiffuseColor.z;
+					const FRenderInfo* rInfo = pChunk[i].RenderInfo;
+					dst[i].World = rInfo->WorldTransformMatrix;
+					dst[i].Tint = rInfo->Color;
+					const auto* subUV = rInfo->SubUVMesh;
+					dst[i].UVScale = subUV ? subUV->UVScale : defaultUVScale;
+					dst[i].UVOffset = subUV ? subUV->UVOffset : defaultUVOffset;
 				}
-				finalTint.A = 1.0f;
-				dst[i].Tint = finalTint;
+			}
+			else
+			{
+				for (uint32 i = 0; i < currentBatchCount; ++i)
+				{
+					const FRenderInfo* rInfo = pChunk[i].RenderInfo;
+					dst[i].World = rInfo->WorldTransformMatrix;
 
-				dst[i].UVScale = entry.RenderInfo->SubUVMesh ? entry.RenderInfo->SubUVMesh->UVScale : FVector2(1.0f, 1.0f);
-				dst[i].UVOffset = entry.RenderInfo->SubUVMesh ? entry.RenderInfo->SubUVMesh->UVOffset : FVector2(0.0f, 0.0f);
+					FLinearColor finalTint = rInfo->Color;
+					finalTint.R *= matDiffuse.x;
+					finalTint.G *= matDiffuse.y;
+					finalTint.B *= matDiffuse.z;
+					finalTint.A = 1.0f;
+					dst[i].Tint = finalTint;
+
+					const auto* subUV = rInfo->SubUVMesh;
+					dst[i].UVScale = subUV ? subUV->UVScale : defaultUVScale;
+					dst[i].UVOffset = subUV ? subUV->UVOffset : defaultUVOffset;
+				}
 			}
 			context->Unmap(perObjectCB, 0);
 		}
 
 		// Draw calls in the chunk (zero Map/Unmap)
-		for (uint32 i = 0; i < currentBatchCount; ++i)
+		if (context1)
 		{
-			const auto& entry = pChunk[i];
+			for (uint32 i = 0; i < currentBatchCount; ++i)
+			{
+				const auto& entry = pChunk[i];
 
-			// Set Material resources only if the material has changed
-			if (entry.Material != lastUsedMaterial)
-			{
-				ID3D11ShaderResourceView* diffuseTexture = nullptr;
-				ID3D11ShaderResourceView* normalTexture = nullptr;
-				ID3D11ShaderResourceView* specularTexture = nullptr;
-				if (entry.Material->DiffuseTexture.IsValid())
+				// Set Material resources only if the material has changed
+				if (entry.Material != lastUsedMaterial) [[unlikely]]
 				{
-					diffuseTexture = resources.FindTextureOrAdd(entry.Material->DiffuseTexture);
+					ID3D11ShaderResourceView* diffuseTexture = nullptr;
+					ID3D11ShaderResourceView* normalTexture = nullptr;
+					ID3D11ShaderResourceView* specularTexture = nullptr;
+					if (entry.Material->DiffuseTexture.IsValid())
+					{
+						diffuseTexture = resources.FindTextureOrAdd(entry.Material->DiffuseTexture);
+					}
+					if (entry.Material->NormalTexture.IsValid())
+					{
+						normalTexture = resources.FindTextureOrAdd(entry.Material->NormalTexture);
+					}
+					if (entry.Material->SpecularTexture.IsValid())
+					{
+						specularTexture = resources.FindTextureOrAdd(entry.Material->SpecularTexture);
+					}
+					mRenderer->SetMaterialResources(
+						diffuseTexture,
+						normalTexture,
+						specularTexture,
+						&resources.GetSamplerState(SST_Wrap)
+					);
+					lastUsedMaterial = entry.Material;
 				}
-				if (entry.Material->NormalTexture.IsValid())
-				{
-					normalTexture = resources.FindTextureOrAdd(entry.Material->NormalTexture);
-				}
-				if (entry.Material->SpecularTexture.IsValid())
-				{
-					specularTexture = resources.FindTextureOrAdd(entry.Material->SpecularTexture);
-				}
-				mRenderer->SetMaterialResources(
-					diffuseTexture,
-					normalTexture,
-					specularTexture,
-					&resources.GetSamplerState(SST_Wrap)
-				);
-				lastUsedMaterial = entry.Material;
-			}
 
-			// Set Mesh resources only if the mesh has changed
-			if (entry.StaticMeshLOD != lastUsedMeshLOD)
-			{
-				lastUsedBuffer = resources.FindImmutableBufferOrAdd(entry.StaticMeshLOD->BufferKey);
-				if (lastUsedBuffer == nullptr)
+				// Set Mesh resources only if the mesh has changed
+				if (entry.StaticMeshLOD != lastUsedMeshLOD) [[unlikely]]
 				{
-					UE_LOG(Error, Render, "Static mesh buffer not found.");
-					assert(false);
-					continue;
+					lastUsedBuffer = resources.FindImmutableBufferOrAdd(entry.StaticMeshLOD->BufferKey);
+					if (lastUsedBuffer == nullptr)
+					{
+						UE_LOG(Error, Render, "Static mesh buffer not found.");
+						assert(false);
+						continue;
+					}
+					mRenderer->SetStaticMeshResources(
+						lastUsedBuffer->Buffer.GetAddressOf(),
+						lastUsedBuffer->IndexBuffer.Get()
+					);
+					bHasIndexBuffer = (lastUsedBuffer->IndexBuffer != nullptr);
+					currentIndexCount = static_cast<UINT>(entry.IndexCount);
+					currentStartIndex = static_cast<UINT>(entry.StartIndex);
+					lastUsedMeshLOD = entry.StaticMeshLOD;
 				}
-				mRenderer->SetStaticMeshResources(
-					lastUsedBuffer->Buffer.GetAddressOf(),
-					lastUsedBuffer->IndexBuffer.Get()
-				);
-				lastUsedMeshLOD = entry.StaticMeshLOD;
-			}
 
-			// Bind offset constant buffer for current object (16 float4 vectors = 256 bytes, VS only)
-			if (context1)
-			{
-				UINT firstConstant = i * 16;
-				UINT numConstants = 16;
-				context1->VSSetConstantBuffers1(1, 1, &perObjectCB, &firstConstant, &numConstants);
-			}
+				// Bind offset constant buffer for current object (16 float4 vectors = 256 bytes, VS only)
+				const UINT firstConstant = i << 4;
+				context1->VSSetConstantBuffers1(1, 1, &perObjectCB, &firstConstant, &kNumConstants);
 
-			if (lastUsedBuffer->IndexBuffer)
-			{
-				context->DrawIndexed(entry.IndexCount, entry.StartIndex, 0);
+				if (bHasIndexBuffer)
+				{
+					context->DrawIndexed(currentIndexCount, currentStartIndex, 0);
+				}
+				else
+				{
+					context->Draw(lastUsedBuffer->SourceNum, 0);
+				}
 			}
-			else
+		}
+		else
+		{
+			for (uint32 i = 0; i < currentBatchCount; ++i)
 			{
-				context->Draw(lastUsedBuffer->SourceNum, 0);
+				const auto& entry = pChunk[i];
+
+				if (entry.Material != lastUsedMaterial)
+				{
+					ID3D11ShaderResourceView* diffuseTexture = nullptr;
+					ID3D11ShaderResourceView* normalTexture = nullptr;
+					ID3D11ShaderResourceView* specularTexture = nullptr;
+					if (entry.Material->DiffuseTexture.IsValid())
+					{
+						diffuseTexture = resources.FindTextureOrAdd(entry.Material->DiffuseTexture);
+					}
+					if (entry.Material->NormalTexture.IsValid())
+					{
+						normalTexture = resources.FindTextureOrAdd(entry.Material->NormalTexture);
+					}
+					if (entry.Material->SpecularTexture.IsValid())
+					{
+						specularTexture = resources.FindTextureOrAdd(entry.Material->SpecularTexture);
+					}
+					mRenderer->SetMaterialResources(
+						diffuseTexture,
+						normalTexture,
+						specularTexture,
+						&resources.GetSamplerState(SST_Wrap)
+					);
+					lastUsedMaterial = entry.Material;
+				}
+
+				if (entry.StaticMeshLOD != lastUsedMeshLOD)
+				{
+					lastUsedBuffer = resources.FindImmutableBufferOrAdd(entry.StaticMeshLOD->BufferKey);
+					if (lastUsedBuffer == nullptr)
+					{
+						continue;
+					}
+					mRenderer->SetStaticMeshResources(
+						lastUsedBuffer->Buffer.GetAddressOf(),
+						lastUsedBuffer->IndexBuffer.Get()
+					);
+					bHasIndexBuffer = (lastUsedBuffer->IndexBuffer != nullptr);
+					currentIndexCount = static_cast<UINT>(entry.IndexCount);
+					currentStartIndex = static_cast<UINT>(entry.StartIndex);
+					lastUsedMeshLOD = entry.StaticMeshLOD;
+				}
+
+				if (bHasIndexBuffer)
+				{
+					context->DrawIndexed(currentIndexCount, currentStartIndex, 0);
+				}
+				else
+				{
+					context->Draw(lastUsedBuffer->SourceNum, 0);
+				}
 			}
 		}
 	}
