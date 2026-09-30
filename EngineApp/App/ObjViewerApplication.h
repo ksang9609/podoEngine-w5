@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <filesystem>
 #include <memory>
@@ -77,7 +77,7 @@ private:
 
 	bool mbImGuiInitialized = false;
 
-	FFrameTimer mFrameTimer{ 120 };
+	FFrameTimer mFrameTimer{ 12000 };
 
 	// 입력을 받을 변수
 	FWindowApplication mWindowApplication;

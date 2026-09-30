@@ -24,43 +24,50 @@ namespace
 		float screenSize, float radius,
 		FGpuResourceManager& gpuResourceManager)
 	{
-		assert(radius != 0.0f);
+		if (radius <= 0.0001f)
+		{
+			radius = 1.0f;
+		}
 		if (screenSize >= 0.5f)
 		{
 			return 0; // No need to generate LODs for large screen sizes
 		}
-		if (screenSize <= 0.0625f)
-		{
-			return staticMesh.GetLODCount() - 1; // No need to generate LODs for very small screen sizes
-		}
 
 		constexpr float maxScreenSizes[] = { 0.5f, 0.25f, 0.125f, 0.0625f, 0.03f, 0.01f };
 		constexpr float minScreenSizes[] = { 0.25f, 0.125f, 0.0625f, 0.03f, 0.01f, 0.0f };
+		constexpr float reductionRatios[] = { 0.5f, 0.25f, 0.125f, 0.06f, 0.03f, 0.01f };
 
 		const FStaticMeshLOD& baseLOD = staticMesh.GetStaticMeshAsset()->LODs[0];
+		if (baseLOD.Vertices.IsEmpty() || baseLOD.Indices.IsEmpty())
+		{
+			return 0;
+		}
+
 		float simplifyScale = meshopt_simplifyScale(
 			&baseLOD.Vertices[0].pos.x,
 			baseLOD.Vertices.Num(),
 			sizeof(FNormalVertex)
 		);
-		assert(simplifyScale > 0.0f);
-
-		const float pixelError = 1.0f; // This can be adjusted based on the desired quality
-
-		// NOTE: If the user created LODs manually, this function can be broken.
-		for (int32 i = staticMesh.GetLODCount() - 1; i < 3; ++i)
+		if (simplifyScale <= 0.0f)
 		{
-			if (screenSize >= maxScreenSizes[i])
+			simplifyScale = 1.0f;
+		}
+
+		const float pixelError = 2.0f;
+		const float viewHeight = (view.Rect.Height > 0.0f) ? view.Rect.Height : 720.0f;
+
+		// Generate LODs up to 4 levels (LOD 0, 1, 2, 3)
+		int32 startLod = staticMesh.GetLODCount() - 1;
+		for (int32 i = startLod; i < 3; ++i)
+		{
+			float targetError =
+				(2.0f * radius * pixelError) /
+				(simplifyScale * viewHeight * maxScreenSizes[i]);
+
+			if (!staticMesh.GenerateLOD(reductionRatios[i], minScreenSizes[i], targetError))
 			{
 				break;
 			}
-
-			float targetError =
-				(2.0f * radius * pixelError) /
-				(simplifyScale * view.Rect.Height * maxScreenSizes[i]);
-
-			if (!staticMesh.GenerateLOD(0.0f, minScreenSizes[i], targetError))
-				break;
 
 			const FStaticMeshLOD& newLOD = staticMesh.GetStaticMeshAsset()->LODs.Last();
 			gpuResourceManager.CreateBuffer(
@@ -68,10 +75,9 @@ namespace
 				newLOD.Vertices,
 				newLOD.Indices);
 
-
 			if (screenSize >= minScreenSizes[i])
 			{
-				return i;
+				return staticMesh.GetLODCount() - 1;
 			}	
 		}
 		return staticMesh.GetLODCount() - 1;
@@ -80,17 +86,10 @@ namespace
 	int32 calculateMeshLODIndex(const FRenderInfo* renderInfo, const FSceneView& view, FGpuResourceManager& gpuResourceManager)
 	{
 		const FStaticMesh* staticMesh = renderInfo->StaticMeshAsset->GetStaticMeshAsset();
-		if (!staticMesh)
+		if (!staticMesh || staticMesh->LODs.IsEmpty())
 		{
 			return 0;
 		}
-
-		if (staticMesh->LODs.Num() <= 1)
-		{
-			return 0;
-		}
-
-		// ScreenSize = R / (D * tan(FOV / 2)
 
 		// Get distance between camera and object
 		const FVector3 objectPos = renderInfo->GetLocation();
@@ -103,6 +102,10 @@ namespace
 		}
 		// Get Radius from object's bounding box
 		float radius = ((renderInfo->WorldBounds.max - renderInfo->WorldBounds.min) * 0.5f).Length();
+		if (radius <= 0.0001f)
+		{
+			radius = 1.0f;
+		}
 
 		// Get tan(FOV / 2) from Projection matrix[1][1]
 		float projScale = view.projectionMatrix.M[1][1] * view.orthoDistance; // 1 / tan(FOV / 2)
@@ -116,6 +119,12 @@ namespace
 			{
 				return i;
 			}
+		}
+
+		// If no LOD matches and we already generated max LODs, return the lowest detail LOD
+		if (staticMesh->LODs.Num() >= 4)
+		{
+			return staticMesh->LODs.Num() - 1;
 		}
 
 		// If no LOD matches, generate new LODs if possible
@@ -137,42 +146,27 @@ namespace
 
 		const UStaticMesh* lastStaticMeshAsset = nullptr;
 		const FStaticMesh* lastStaticMesh = nullptr;
-		const FStaticMeshLOD* lastMeshLod = nullptr;
-		uint32 lastMeshKey = 0;
-		int32 lastLodCount = 0;
 
 		const UMaterial* lastMaterialAsset = nullptr;
 		const FMaterial* lastMaterial = nullptr;
 		FSortKey lastSortKey;
 		ERenderFlags lastFlags = ERenderFlags::RF_None;
+		uint32 lastMeshKey = 0;
 
 		for (const FRenderInfo* renderInfo : renderQueue)
 		{
 			assert(renderInfo->StaticMeshAsset != nullptr);
 
-			// Fast cache for StaticMesh & LOD
-			const FStaticMeshLOD* meshLod = nullptr;
-			uint32 meshKey = 0;
-
-			if (renderInfo->StaticMeshAsset == lastStaticMeshAsset && lastLodCount <= 1)
-			{
-				meshLod = lastMeshLod;
-				meshKey = lastMeshKey;
-			}
-			else
+			if (renderInfo->StaticMeshAsset != lastStaticMeshAsset)
 			{
 				lastStaticMeshAsset = renderInfo->StaticMeshAsset;
 				lastStaticMesh = lastStaticMeshAsset->GetStaticMeshAsset();
 				assert(lastStaticMesh != nullptr);
-				lastLodCount = lastStaticMesh->LODs.Num();
-
-				const int32 meshLodIndex = calculateMeshLODIndex(renderInfo, view, gpuResourceManager);
-				lastMeshLod = &lastStaticMesh->LODs[meshLodIndex];
-				lastMeshKey = lastMeshLod->BufferKey.GetDisplayId().ToUnstableInt();
-
-				meshLod = lastMeshLod;
-				meshKey = lastMeshKey;
 			}
+
+			const int32 meshLodIndex = calculateMeshLODIndex(renderInfo, view, gpuResourceManager);
+			const FStaticMeshLOD* meshLod = &lastStaticMesh->LODs[meshLodIndex];
+			const uint32 meshKey = meshLod->BufferKey.GetDisplayId().ToUnstableInt();
 
 			const TArray<FStaticMeshSection>& sections = meshLod->Sections;
 			const TArray<const UMaterial*>& materials = renderInfo->Materials;
@@ -743,13 +737,12 @@ void FGraphicsManager::renderStaticMesh(const TArray<const FRenderInfo*>& render
 				lastUsedMeshLOD = entry.StaticMeshLOD;
 			}
 
-			// Bind offset constant buffer for current object (16 float4 vectors = 256 bytes)
+			// Bind offset constant buffer for current object (16 float4 vectors = 256 bytes, VS only)
 			if (context1)
 			{
 				UINT firstConstant = i * 16;
 				UINT numConstants = 16;
 				context1->VSSetConstantBuffers1(1, 1, &perObjectCB, &firstConstant, &numConstants);
-				context1->PSSetConstantBuffers1(1, 1, &perObjectCB, &firstConstant, &numConstants);
 			}
 
 			if (lastUsedBuffer->IndexBuffer)

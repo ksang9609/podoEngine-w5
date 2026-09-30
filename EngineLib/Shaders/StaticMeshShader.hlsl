@@ -40,7 +40,9 @@ PS_INPUT mainVS(VS_INPUT input)
     PS_INPUT output;
 
     output.position = mul(mul(float4(input.position.xyz, 1.0f), World), ViewProjection);
-    output.color = input.color;
+    output.normal = input.normal;
+    float3 tintRgb = lerp(float3(1.0f, 1.0f, 1.0f), Tint.rgb, Tint.a);
+    output.color = float4(input.color.rgb * tintRgb, input.color.a);
     output.uv = input.uv * UVScale + UVOffset;
 
     return output;
@@ -48,7 +50,5 @@ PS_INPUT mainVS(VS_INPUT input)
 
 float4 mainPS(PS_INPUT input) : SV_TARGET
 {
-    float4 sampleColor = g_txColor.Sample(g_Sample, input.uv) * input.color;
-    float3 smapleColorRGB = sampleColor.rgb * lerp(1, Tint.rgb, Tint.a);
-    return float4(smapleColorRGB, sampleColor.a);
+    return g_txColor.Sample(g_Sample, input.uv) * input.color;
 }

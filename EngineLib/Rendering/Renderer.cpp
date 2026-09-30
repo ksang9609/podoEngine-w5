@@ -96,6 +96,12 @@ void URenderer::createDeviceAndSwapChain(HWND hWindow)
 		mDeviceContext.As(&mDeviceContext1);
 	}
 
+	Microsoft::WRL::ComPtr<IDXGIDevice1> dxgiDevice;
+	if (SUCCEEDED(mDevice.As(&dxgiDevice)))
+	{
+		dxgiDevice->SetMaximumFrameLatency(1);
+	}
+
 	mSwapChain->GetDesc(&swapchaindesc);
 
 	mViewportInfo = { 0.0f, 0.0f, (float)swapchaindesc.BufferDesc.Width, (float)swapchaindesc.BufferDesc.Height, 0.0f, 1.0f };

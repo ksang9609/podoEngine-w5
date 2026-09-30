@@ -1,4 +1,4 @@
-﻿#include "StaticMesh.h"
+#include "StaticMesh.h"
 #include "ThirdParty/Meshoptimizer/meshoptimizer.h"
 
 IMPLEMENT_CLASS_WITH_PROPERTIES(UStaticMesh, UObject);
@@ -87,7 +87,7 @@ bool UStaticMesh::GenerateLOD(float reductionRatio, float screenSize, float targ
 		return false;
 	}
 
-	const FStaticMeshLOD baseLOD = mStaticMeshAsset->LODs[0];
+	const FStaticMeshLOD& baseLOD = mStaticMeshAsset->LODs[0];
 	uint32 currentIndexOffset = 0;
 
 	// Set new LOD

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <windows.h>
 
 class FFrameTimer
@@ -18,14 +18,15 @@ public:
 	}
 	void EndFrame()
 	{	
-		do
-		{
-			Sleep(0);
+		QueryPerformanceCounter(&EndTime);
+		elapsedTime = (EndTime.QuadPart - StartTime.QuadPart) * 1000.0 / Frequency.QuadPart;
 
+		while (elapsedTime < targetFrameTime)
+		{
+			YieldProcessor();
 			QueryPerformanceCounter(&EndTime);
 			elapsedTime = (EndTime.QuadPart - StartTime.QuadPart) * 1000.0 / Frequency.QuadPart;
-
-		} while (elapsedTime < targetFrameTime);
+		}
 	}
 
 	float GetDeltaTime() const { return deltaTime; }
