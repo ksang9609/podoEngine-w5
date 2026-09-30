@@ -1,6 +1,7 @@
-﻿#pragma once
+#pragma once
 
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
@@ -41,6 +42,8 @@ public:
 
 	ID3D11Device* GetDevice() const { return mDevice.Get(); }
 	ID3D11DeviceContext* GetDeviceContext() const { return mDeviceContext.Get(); }
+	ID3D11DeviceContext1* GetDeviceContext1() const { return mDeviceContext1.Get(); }
+	ID3D11Buffer* GetPerObjectConstantBuffer() const { return mPerObjectCB.Get(); }
 	ID3D11ShaderResourceView* GetDepthBufferSRV() const { return mDepthBufferSRV.Get(); }
 	ID3D11RenderTargetView* GetFrameBufferRTV() const { return mFrameBufferRTV.Get(); }
 	ID3D11DepthStencilView* GetDepthStencilView() const { return mDepthStencilView.Get(); }
@@ -78,6 +81,7 @@ public:
 	void PrepareStaticMesh();
 
 	/* Update methods for each rendering type */
+	void UpdateFrameConstant(const FMatrix& viewProjection);
 	void UpdateSimpleConstant(FMatrix world, FMatrix viewProjection, FLinearColor tint = FLinearColor(0, 0, 0, 0));
 	void UpdateTextureConstant(FMatrix world, FMatrix viewProjection, FLinearColor tint = FLinearColor(0, 0, 0, 0),
 		FVector2 uvScale = { 1.0f, 1.0f }, FVector2 uvOffset = { 0.0f, 0.0f });
@@ -173,6 +177,10 @@ private:
 	ComPtr<ID3D11RenderTargetView> mSelectionMaskRTV = nullptr;
 	ComPtr<ID3D11ShaderResourceView> mSelectionMaskSRV = nullptr;
 
+	ComPtr<ID3D11DeviceContext1> mDeviceContext1 = nullptr;
+	ComPtr<ID3D11Buffer> mFrameCB = nullptr;
+	ComPtr<ID3D11Buffer> mPerObjectCB = nullptr;
+
 	FLOAT mClearColor[4] = { 0.025f, 0.025f, 0.025f, 1.0f };
 	D3D11_VIEWPORT mViewportInfo;
 
@@ -184,6 +192,7 @@ private:
 	void createFrameBuffer();
 	void createDepthStencilBuffer(UINT width, UINT height);
 	void createSelectionMaskResources(UINT width, UINT height);
+	void createOffsetConstantBuffers();
 
 	/* Prepare methods for each shader */
 	void prepareSimpleShader();

@@ -1,4 +1,4 @@
-﻿#include "World.h"
+#include "World.h"
 
 #include <format>
 
@@ -117,6 +117,7 @@ void UWorld::AddActor(std::unique_ptr<AActor> actor)
 	assert(getActorIndex(actor->UUID) == -1);
 
 	mActors.Add(std::move(actor));
+	mbRenderInfosDirty = true;
 }
 
 bool UWorld::RemoveActor(uint32 componentUUID)
@@ -129,6 +130,7 @@ bool UWorld::RemoveActor(uint32 componentUUID)
 
 	//mActors.RemoveAt(componentIndex, 1);
 	mActors.RemoveAtSwap(componentIndex);
+	mbRenderInfosDirty = true;
 
 	return true;
 }
@@ -140,11 +142,15 @@ const TArray<const FRenderInfo*>& UWorld::GetRenderInfos()
 
 void UWorld::Update(float deltaTime)
 {
-	mRenderInfoRefs.Reset(DEFAULT_RESERVE_MEM);
-
-	for (auto& actor : mActors)
+	if (mbRenderInfosDirty || mRenderInfoRefs.Num() != mActors.Num())
 	{
-		actor->Update(deltaTime, mRenderInfoRefs);
+		mRenderInfoRefs.Reset(mActors.Num());
+
+		for (auto& actor : mActors)
+		{
+			actor->Update(deltaTime, mRenderInfoRefs);
+		}
+		mbRenderInfosDirty = false;
 	}
 }
 

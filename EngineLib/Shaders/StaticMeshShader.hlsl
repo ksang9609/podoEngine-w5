@@ -20,14 +20,19 @@ Texture2D NormalTexture : register(t1);
 Texture2D SpecularTexture : register(t2);
 SamplerState g_Sample : register(s0);
 
-cbuffer textureConstatnts : register(b0)
+cbuffer FrameConstants : register(b0)
+{
+    row_major float4x4 ViewProjection;
+}
+
+cbuffer ObjectConstants : register(b1)
 {
     row_major float4x4 World;
-    row_major float4x4 ViewProjection;
     float4 Tint;
     // sub uv
     float2 UVScale;
     float2 UVOffset;
+    float2 Pad;
 }
 
 PS_INPUT mainVS(VS_INPUT input)

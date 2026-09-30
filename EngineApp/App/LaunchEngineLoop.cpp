@@ -76,7 +76,7 @@ void FEngineLoop::Init(HINSTANCE hInstance, WNDPROC WndProc)
 
 	/* Init Managers */
 	mGraphicsManager = new FGraphicsManager();
-	FrameTimer = new FFrameTimer(120);
+	FrameTimer = new FFrameTimer(12000);
 	mAssetManager = std::make_unique<FAssetManager>();
 	mGpuResourceManager = std::make_unique<FGpuResourceManager>();
 

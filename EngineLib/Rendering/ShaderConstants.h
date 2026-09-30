@@ -1,4 +1,4 @@
-﻿#include "Core/Math/Matrix.h"
+#include "Core/Math/Matrix.h"
 #include "Core/Math/Vector.h"
 #include "Core/Math/Color.h"
 
@@ -8,6 +8,21 @@ struct FConstants
 	FMatrix ViewProjection;
 	FLinearColor Tint;          // rgb = 색, a = 섞는 비율
 };
+
+struct FFrameConstants
+{
+	FMatrix ViewProjection;
+};
+
+struct alignas(256) FPerObjectConstants
+{
+	FMatrix World;
+	FLinearColor Tint;
+	FVector2 UVScale;
+	FVector2 UVOffset;
+	float Pad[40];
+};
+static_assert(sizeof(FPerObjectConstants) == 256, "FPerObjectConstants must be 256 bytes");
 
 struct FTextureConstants
 {

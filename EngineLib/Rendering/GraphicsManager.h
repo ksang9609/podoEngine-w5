@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include<wrl/client.h>
 
@@ -36,6 +36,56 @@ enum ERenderQueueType
 	RQT_BoundingBox,
 	RQT_Particle,
 	RQT_StaticMesh,
+};
+
+constexpr uint32 MAX_PASS_VALUE = 0xFu;
+constexpr uint32 MAX_DEPTH_VALUE = 0xFFFu;
+constexpr uint32 MAX_PIPELINE_VALUE = 0x7FFFu;
+constexpr uint32 MAX_MATERIAL_VALUE = 0xFFFFu;
+constexpr uint32 MAX_MESH_VALUE = 0xFFFFu;
+
+struct FSortKey
+{
+	uint64 Key;
+
+	FSortKey() : Key(0) {}
+	FSortKey(
+		uint32 pass,
+		uint32 depth,
+		uint32 pipeline,
+		uint32 material,
+		uint32 mesh,
+		bool bOpaque = true)
+	{
+		if (bOpaque)
+		{
+			Key = (static_cast<uint64>(pass & MAX_PASS_VALUE) << 60) |
+				(static_cast<uint64>(0) << 59) |
+				(static_cast<uint64>(pipeline & MAX_PIPELINE_VALUE) << 44) |
+				(static_cast<uint64>(material & MAX_MATERIAL_VALUE) << 28) |
+				(static_cast<uint64>(mesh & MAX_MESH_VALUE) << 12) |
+				(static_cast<uint64>(depth & MAX_DEPTH_VALUE));
+		}
+		else
+		{
+			Key = (static_cast<uint64>(pass & MAX_PASS_VALUE) << 60) |
+				(static_cast<uint64>(1) << 59) |
+				(static_cast<uint64>((depth & MAX_DEPTH_VALUE) ^ MAX_DEPTH_VALUE) << 47) |
+				(static_cast<uint64>(pipeline & MAX_PIPELINE_VALUE) << 32) |
+				(static_cast<uint64>(material & MAX_MATERIAL_VALUE) << 16) |
+				static_cast<uint64>(mesh & MAX_MESH_VALUE);
+		}
+	}
+};
+
+struct FStaticMeshRenderQueueEntry
+{
+	FSortKey SortKey;
+	const FRenderInfo* RenderInfo = nullptr;
+	int32 StartIndex = 0;
+	int32 IndexCount = 0;
+	const FStaticMeshLOD* StaticMeshLOD = nullptr;
+	const FMaterial* Material = nullptr;
 };
 
 class FGraphicsManager
@@ -199,6 +249,11 @@ private:
 	bool mbEnableHiZ = true;
 
 	void hiZOcclusionCulling(FHiZBuffer* inHiZBuffer, const TArray<const FRenderInfo*>& inRenderInfos, TArray<const FRenderInfo*>& outRenderInfos);
+
+	// Cached render containers across frames (zero per-frame dynamic allocations)
+	TMap<ERenderQueueType, TArray<const FRenderInfo*>> mRenderQueueMap;
+	TArray<FStaticMeshRenderQueueEntry> mStaticMeshRenderQueue;
+	TArray<const FRenderInfo*> mVisibleRenderInfos;
 
 public:
 	void SetEnableHiZ(bool bEnable);

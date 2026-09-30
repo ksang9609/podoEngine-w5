@@ -1,4 +1,4 @@
-﻿#include "FHiZBuffer.h"
+#include "FHiZBuffer.h"
 #include <d3dcompiler.h>
 
 void FHiZBuffer::Initialize(ID3D11Device* device)
@@ -23,8 +23,21 @@ void FHiZBuffer::Release()
 	mHzbTexture.Reset();
 	mHzbFullSRV.Reset();
 	mHzBuildCS.Reset();
+	mHzCullCS.Reset();
 	mConstantBuffer.Reset();
+	mCullConstantBuffer.Reset();
 	mPointClampSampler.Reset();
+	mAABBBuffer.Reset();
+	mAABBSRV.Reset();
+	mVisibilityBuffer.Reset();
+	mVisibilityUAV.Reset();
+	for (uint32 i = 0; i < STAGING_BUFFER_COUNT; ++i)
+	{
+		mStagingBuffers[i].Reset();
+	}
+	mVisibilityCache.Reset(0);
+	mHasValidStagingData = false;
+	mbIsInitialized = false;
 }
 
 void FHiZBuffer::BuildHiZ(ID3D11DeviceContext* context, ID3D11ShaderResourceView* mainDepthSRV, float viewportX, float viewportY,
@@ -186,20 +199,16 @@ void FHiZBuffer::ExecuteOcclusionCull(ID3D11DeviceContext* context, ID3D11Device
 	D3D11_MAPPED_SUBRESOURCE mapped = {};
 	if (SUCCEEDED(context->Map(mAABBBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
 	{
-		FGpuAABB* dstAABB = (FGpuAABB*)mapped.pData;
+		FGpuAABB* dstAABB = static_cast<FGpuAABB*>(mapped.pData);
 		const FRenderInfo* const* rawInfos = renderInfos.GetData();
 
 		for (uint32 i = 0; i < numObjects; ++i)
 		{
 			const FRenderInfo* info = rawInfos[i];
-
-			FGpuAABB curAABB;
-			curAABB.Min = info->WorldBounds.min;
-			curAABB.InternalID = info->ObejctID.InternalIndex;
-			curAABB.Max = info->WorldBounds.max;
-			curAABB.Pad2 = 0.0f;
-
-			dstAABB[i] = curAABB;
+			dstAABB[i].Min = info->WorldBounds.min;
+			dstAABB[i].InternalID = info->ObejctID.InternalIndex;
+			dstAABB[i].Max = info->WorldBounds.max;
+			dstAABB[i].Pad2 = 0.0f;
 		}
 		context->Unmap(mAABBBuffer.Get(), 0);
 	}
@@ -222,7 +231,7 @@ void FHiZBuffer::ExecuteOcclusionCull(ID3D11DeviceContext* context, ID3D11Device
 	context->CSSetShaderResources(0, 2, srvs);
 	context->CSSetUnorderedAccessViews(0, 1, mVisibilityUAV.GetAddressOf(), nullptr);
 
-	// Dispatch (64 treads)
+	// Dispatch (64 threads)
 	uint32 threadGroups = (numObjects + 63) / 64;
 	context->Dispatch(threadGroups, 1, 1);
 
@@ -232,41 +241,63 @@ void FHiZBuffer::ExecuteOcclusionCull(ID3D11DeviceContext* context, ID3D11Device
 	context->CSSetShaderResources(0, 2, nullSRVs);
 	context->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
 
-	// Copy result to staging buffer
-	context->CopyResource(mStagingBuffers[mCurrentStatingIndex].Get(), mVisibilityBuffer.Get());
+	// Copy result to staging buffer (Triple buffering)
+	context->CopyResource(mStagingBuffers[mCurrentStagingIndex].Get(), mVisibilityBuffer.Get());
 
-	// Change index to next frame
-	mCurrentStatingIndex = 1 - mCurrentStatingIndex;
-	mHasValidStagingData = true;
+	mCurrentStagingIndex = (mCurrentStagingIndex + 1) % STAGING_BUFFER_COUNT;
+	mStagedFrameCount++;
+	if (mStagedFrameCount >= 2)
+	{
+		mHasValidStagingData = true;
+	}
 }
 
 const uint32* FHiZBuffer::ReadbackVisibility(ID3D11DeviceContext* contex, uint32& outCount)
 {
-	// First frame(no data)
 	if (!mHasValidStagingData)
 	{
 		outCount = 0;
 		return nullptr;
 	}
 
-	// GPU always read staged buffer
-	uint32 readIndex = 1 - mCurrentStatingIndex;
+	// Read buffer from 2 frames ago (avoids GPU stall)
+	uint32 readIndex = (mCurrentStagingIndex + 1) % STAGING_BUFFER_COUNT;
 
 	D3D11_MAPPED_SUBRESOURCE mapped = {};
-	HRESULT hr = contex->Map(mStagingBuffers[readIndex].Get(), 0, D3D11_MAP_READ, 0, &mapped);
+	HRESULT hr = contex->Map(mStagingBuffers[readIndex].Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
 	if (SUCCEEDED(hr))
 	{
 		outCount = mAllocatedVisibilityCount;
-		return (const uint32*)mapped.pData;
+		if (mVisibilityCache.Num() < static_cast<int32>(mAllocatedVisibilityCount))
+		{
+			mVisibilityCache.SetNum(mAllocatedVisibilityCount);
+		}
+		memcpy(mVisibilityCache.GetData(), mapped.pData, mAllocatedVisibilityCount * sizeof(uint32));
+		contex->Unmap(mStagingBuffers[readIndex].Get(), 0);
+		mIsMapped = false;
+		return mVisibilityCache.GetData();
+	}
+	else if (hr == DXGI_ERROR_WAS_STILL_DRAWING)
+	{
+		// GPU is still writing: return previous cached frame immediately (0ms stall)
+		if (mVisibilityCache.Num() > 0)
+		{
+			outCount = static_cast<uint32>(mVisibilityCache.Num());
+			return mVisibilityCache.GetData();
+		}
 	}
 
+	outCount = 0;
 	return nullptr;
 }
 
 void FHiZBuffer::UnmapVisibility(ID3D11DeviceContext* context)
 {
-	uint32 readIndex = 1 - mCurrentStatingIndex;
-	context->Unmap(mStagingBuffers[readIndex].Get(), 0);
+	if (mIsMapped)
+	{
+		context->Unmap(mStagingBuffers[mLastMappedIndex].Get(), 0);
+		mIsMapped = false;
+	}
 }
 
 void FHiZBuffer::createCullShader(ID3D11Device* device)
@@ -295,12 +326,13 @@ void FHiZBuffer::createCullShader(ID3D11Device* device)
 void FHiZBuffer::ensureBufferCapacity(ID3D11Device* device, uint32 requiredAABBCount, uint32 requiredVisibilityCount)
 {
 	// not need to realloc
-	if (((requiredAABBCount <= mAllocatedAABBCount) && mAABBBuffer) || ((requiredVisibilityCount <= mAllocatedAABBCount) && mVisibilityBuffer))
+	if ((requiredAABBCount <= mAllocatedAABBCount && mAABBBuffer) &&
+		(requiredVisibilityCount <= mAllocatedVisibilityCount && mVisibilityBuffer))
 	{
 		return;
 	}
 
-	// Increase capcity
+	// Increase capacity
 	uint32 newCapacity = 2 << 11;
 	while (newCapacity < requiredAABBCount)
 	{
@@ -314,8 +346,10 @@ void FHiZBuffer::ensureBufferCapacity(ID3D11Device* device, uint32 requiredAABBC
 	mAABBSRV.Reset();
 	mVisibilityBuffer.Reset();
 	mVisibilityUAV.Reset();
-	mStagingBuffers[0].Reset();
-	mStagingBuffers[1].Reset();
+	for (uint32 i = 0; i < STAGING_BUFFER_COUNT; ++i)
+	{
+		mStagingBuffers[i].Reset();
+	}
 
 	// Create AABB StructuredBuffer
 	D3D11_BUFFER_DESC aabbDesc = {};
@@ -357,13 +391,18 @@ void FHiZBuffer::ensureBufferCapacity(ID3D11Device* device, uint32 requiredAABBC
 	uavDesc.Buffer.NumElements = mAllocatedVisibilityCount;
 	device->CreateUnorderedAccessView(mVisibilityBuffer.Get(), &uavDesc, &mVisibilityUAV);
 
-	// Create Staging buffer
+	// Create Staging buffer (Triple Buffering)
 	D3D11_BUFFER_DESC stagingDesc = {};
 	stagingDesc.ByteWidth = sizeof(uint32) * mAllocatedVisibilityCount;
 	stagingDesc.Usage = D3D11_USAGE_STAGING;
 	stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-	device->CreateBuffer(&stagingDesc, nullptr, &mStagingBuffers[0]);
-	device->CreateBuffer(&stagingDesc, nullptr, &mStagingBuffers[1]);
+	for (uint32 i = 0; i < STAGING_BUFFER_COUNT; ++i)
+	{
+		device->CreateBuffer(&stagingDesc, nullptr, &mStagingBuffers[i]);
+	}
 
+	mCurrentStagingIndex = 0;
+	mStagedFrameCount = 0;
 	mHasValidStagingData = false;
+	mVisibilityCache.Reset(0);
 }

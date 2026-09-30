@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <memory>
 
@@ -31,6 +31,7 @@ public:
 	void Update(float deltaTime);
 	//void Render();
 	void ClearRenderInfos();
+	void MarkRenderInfosDirty() { mbRenderInfosDirty = true; }
 
 	uint32 GetActorCount() const { return static_cast<uint32>(mActors.Num()); }
 
@@ -53,6 +54,7 @@ private:
 
 	// Todo: Maybe, move to FSceneManager
 	TArray<const FRenderInfo*> mRenderInfoRefs;
+	bool mbRenderInfosDirty = true;
 };
 
 #include "World.inl"

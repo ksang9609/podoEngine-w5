@@ -1,4 +1,4 @@
-﻿#include "Renderer.h"
+#include "Renderer.h"
 
 #include <fstream>
 #include <filesystem>
@@ -27,6 +27,7 @@ void URenderer::Initialize(HWND hWindow, FGpuResourceManager& gpuResourceManager
 	mGpuResourceManagerRef = &gpuResourceManagerRef;
 	createDeviceAndSwapChain(hWindow);
 	createFrameBuffer();
+	createOffsetConstantBuffers();
 
 	// 실제 Back Buffer 크기를 가져온다.
 	// SwapChain 생성 시 Width/Height를 0으로 전달했기 때문에
@@ -79,7 +80,9 @@ void URenderer::createDeviceAndSwapChain(HWND hWindow)
 
 	UINT createDeviceFlags = 0;
 
-#if defined(_DEBUG)
+#if defined(_DEBUG) && defined(ENABLE_D3D11_DEBUG_LAYER)
+	// 50,000개 드로우콜 환경에서 D3D11 디버그 레이어는 매 드로우콜마다 API 밸리데이션 락을 발생시켜
+	// 극심한 FPS 폭락을 유발하므로 성능 테스트 시에는 기본 비활성화합니다.
 	createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
 
@@ -87,6 +90,11 @@ void URenderer::createDeviceAndSwapChain(HWND hWindow)
 		D3D11_CREATE_DEVICE_BGRA_SUPPORT | createDeviceFlags,
 		featurelevels, ARRAYSIZE(featurelevels), D3D11_SDK_VERSION,
 		&swapchaindesc, &mSwapChain, &mDevice, nullptr, &mDeviceContext);
+
+	if (mDeviceContext)
+	{
+		mDeviceContext.As(&mDeviceContext1);
+	}
 
 	mSwapChain->GetDesc(&swapchaindesc);
 
@@ -99,6 +107,10 @@ void URenderer::releaseDeviceAndSwapChain()
 	{
 		mDeviceContext->Flush();
 	}
+
+	mFrameCB.Reset();
+	mPerObjectCB.Reset();
+	mDeviceContext1.Reset();
 
 	mSwapChain.Reset();
 	mDevice.Reset();
@@ -179,6 +191,25 @@ void URenderer::createSelectionMaskResources(UINT width, UINT height)
 		mSelectionMaskTexture.Get(),
 		nullptr,
 		&mSelectionMaskSRV);
+}
+
+void URenderer::createOffsetConstantBuffers()
+{
+	// Slot 0: FrameConstants (ViewProjection)
+	D3D11_BUFFER_DESC frameDesc = {};
+	frameDesc.ByteWidth = sizeof(FFrameConstants);
+	frameDesc.Usage = D3D11_USAGE_DYNAMIC;
+	frameDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+	frameDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+	mDevice->CreateBuffer(&frameDesc, nullptr, &mFrameCB);
+
+	// Slot 1: PerObjectConstants (64KB = 256 entries x 256 bytes)
+	D3D11_BUFFER_DESC objDesc = {};
+	objDesc.ByteWidth = static_cast<UINT>(sizeof(FPerObjectConstants) * 256);
+	objDesc.Usage = D3D11_USAGE_DYNAMIC;
+	objDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+	objDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+	mDevice->CreateBuffer(&objDesc, nullptr, &mPerObjectCB);
 }
 
 void URenderer::releaseFrameBuffer()
@@ -655,9 +686,10 @@ void URenderer::prepareStaticMeshShader()
 	mDeviceContext->PSSetShader(&resources.GetPixelShader(PST_StaticMesh), nullptr, 0);
 	mDeviceContext->IASetInputLayout(&resources.GetInputLayout(ILT_PositionNormalColorTexture));
 
-	auto constantBuffer = &resources.GetConstantBuffer(CBT_Texture);
-	mDeviceContext->VSSetConstantBuffers(0, 1, &constantBuffer);
-	mDeviceContext->PSSetConstantBuffers(0, 1, &constantBuffer);
+	if (mFrameCB)
+	{
+		mDeviceContext->VSSetConstantBuffers(0, 1, mFrameCB.GetAddressOf());
+	}
 }
 
 void URenderer::prepareHighlightMaskShader()
@@ -991,6 +1023,20 @@ void URenderer::releaseSelectionMaskResources()
 {
 	mSelectionMaskRTV.Reset();
 	mSelectionMaskSRV.Reset();
+}
+
+void URenderer::UpdateFrameConstant(const FMatrix& viewProjection)
+{
+	assert(mDeviceContext && mFrameCB);
+
+	D3D11_MAPPED_SUBRESOURCE msr = {};
+	if (SUCCEEDED(mDeviceContext->Map(mFrameCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &msr)))
+	{
+		FFrameConstants* constants = (FFrameConstants*)msr.pData;
+		constants->ViewProjection = viewProjection;
+		mDeviceContext->Unmap(mFrameCB.Get(), 0);
+	}
+	mDeviceContext->VSSetConstantBuffers(0, 1, mFrameCB.GetAddressOf());
 }
 
 void URenderer::UpdateSimpleConstant(FMatrix world, FMatrix viewProjection, FLinearColor tint)

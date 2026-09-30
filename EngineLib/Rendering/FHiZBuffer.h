@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -93,10 +93,15 @@ private:
 	ComPtr<ID3D11Buffer> mVisibilityBuffer = nullptr;
 	ComPtr<ID3D11UnorderedAccessView> mVisibilityUAV = nullptr;
 
-	// Staging
-	ComPtr<ID3D11Buffer> mStagingBuffers[2] = { nullptr, nullptr };
-	uint32 mCurrentStatingIndex = 0;
+	// Staging (Triple Buffering to eliminate GPU readback CPU stalling)
+	static constexpr uint32 STAGING_BUFFER_COUNT = 3;
+	ComPtr<ID3D11Buffer> mStagingBuffers[STAGING_BUFFER_COUNT] = { nullptr, nullptr, nullptr };
+	uint32 mCurrentStagingIndex = 0;
+	uint32 mStagedFrameCount = 0;
+	uint32 mLastMappedIndex = 0;
+	bool mIsMapped = false;
 	bool mHasValidStagingData = false;
+	TArray<uint32> mVisibilityCache;
 
 	bool mbIsInitialized = false;
 

@@ -1,4 +1,4 @@
-﻿#include "GraphicsManager.h"
+#include "GraphicsManager.h"
 
 #include <algorithm>
 
@@ -19,109 +19,6 @@
 
 namespace
 {
-	constexpr uint32 MAX_PASS_VALUE = 0xFu; // 4 bits for pass
-	constexpr uint32 MAX_DEPTH_VALUE = 0xFFFu; // 12 bits for depth
-	constexpr uint32 MAX_PIPELINE_VALUE = 0x7FFFu; // 15 bits for pipeline
-	constexpr uint32 MAX_MATERIAL_VALUE = 0xFFFFu; // 16 bits for material
-	constexpr uint32 MAX_MESH_VALUE = 0xFFFFu; // 16 bits for mesh
-
-	struct FSortKey
-	{
-		uint64 Key;
-
-		FSortKey(
-			uint32 pass,
-			uint32 depth,
-			uint32 pipeline,
-			uint32 material,
-			uint32 mesh,
-			bool bOpaque = true)
-		{
-			if (bOpaque)
-			{
-				// Opaque: [Pass(4)] | [0 (1)] | [Pipeline(15)] | [Material(16)] | [Mesh(16)] | [Depth(12)]
-				Key = (static_cast<uint64>(pass & MAX_PASS_VALUE) << 60) |
-					(static_cast<uint64>(0) << 59) |
-					(static_cast<uint64>(pipeline & MAX_PIPELINE_VALUE) << 44) |
-					(static_cast<uint64>(material & MAX_MATERIAL_VALUE) << 28) |
-					(static_cast<uint64>(mesh & MAX_MESH_VALUE) << 12) |
-					(static_cast<uint64>(depth & MAX_DEPTH_VALUE));
-			}
-			else
-			{
-				// TODO: Increase depth precision for translucent objects if needed
-				// Translucent: [Pass(4)] | [1 (1)] | [Inverted Depth(12)] | [Pipeline(15)] | [Material(16)] | [Mesh(16)]
-				Key = (static_cast<uint64>(pass & MAX_PASS_VALUE) << 60) |
-					(static_cast<uint64>(1) << 59) |
-					(static_cast<uint64>((depth & MAX_DEPTH_VALUE) ^ MAX_DEPTH_VALUE) << 47) |
-					(static_cast<uint64>(pipeline & MAX_PIPELINE_VALUE) << 32) |
-					(static_cast<uint64>(material & MAX_MATERIAL_VALUE) << 16) |
-					static_cast<uint64>(mesh & MAX_MESH_VALUE);
-			}
-		}
-
-		uint32 GetPass() const { return static_cast<uint32>((Key >> 60) & MAX_PASS_VALUE); }
-		uint32 GetDepth(bool bOpaque = true) const
-		{
-			if (bOpaque)
-			{
-				return static_cast<uint32>(Key & MAX_DEPTH_VALUE);
-			}
-			else
-			{
-				return static_cast<uint32>((Key >> 47) & MAX_DEPTH_VALUE) ^ MAX_DEPTH_VALUE;
-			}
-		}
-
-		uint32 GetPipeline(bool bOpaque = true) const
-		{
-			if (bOpaque)
-			{
-				return static_cast<uint32>((Key >> 44) & MAX_PIPELINE_VALUE);
-			}
-			else
-			{
-				return static_cast<uint32>((Key >> 32) & MAX_PIPELINE_VALUE);
-			}
-		}
-
-		uint32 GetMaterialKey(bool bOpaque = true) const
-		{
-			if (bOpaque)
-			{
-				return static_cast<uint32>((Key >> 28) & MAX_MATERIAL_VALUE);
-			}
-			else
-			{
-				return static_cast<uint32>((Key >> 16) & MAX_MATERIAL_VALUE);
-			}
-		}
-
-		uint32 GetMeshKey(bool bOpaque = true) const
-		{
-			if (bOpaque)
-			{
-				return static_cast<uint32>((Key >> 12) & MAX_MESH_VALUE);
-			}
-			else
-			{
-				return static_cast<uint32>(Key & MAX_MESH_VALUE);
-			}
-		}
-	};
-
-	struct FStaticMeshRenderQueueEntry
-	{
-		FSortKey SortKey;
-		const FRenderInfo* RenderInfo;
-
-		/* Additional Information */
-		int32 StartIndex = 0;
-		int32 IndexCount = 0;
-		const FStaticMeshLOD* StaticMeshLOD;
-		const FMaterial* Material;
-	};
-
 	// TODO: rename
 	int32 generateMeshLod(UStaticMesh& staticMesh, const FSceneView& view,
 		float screenSize, float radius,
@@ -188,6 +85,11 @@ namespace
 			return 0;
 		}
 
+		if (staticMesh->LODs.Num() <= 1)
+		{
+			return 0;
+		}
+
 		// ScreenSize = R / (D * tan(FOV / 2)
 
 		// Get distance between camera and object
@@ -230,38 +132,54 @@ namespace
 		const UMaterial& defaultMaterialAsset,
 		FGpuResourceManager& gpuResourceManager)
 	{
-		outSortedQueue.Reset(renderQueue.Num());
+		outSortedQueue.Reset(0);
+		outSortedQueue.Reserve(renderQueue.Num());
+
+		const UStaticMesh* lastStaticMeshAsset = nullptr;
+		const FStaticMesh* lastStaticMesh = nullptr;
+		const FStaticMeshLOD* lastMeshLod = nullptr;
+		uint32 lastMeshKey = 0;
+		int32 lastLodCount = 0;
+
+		const UMaterial* lastMaterialAsset = nullptr;
+		const FMaterial* lastMaterial = nullptr;
+		FSortKey lastSortKey;
+		ERenderFlags lastFlags = ERenderFlags::RF_None;
 
 		for (const FRenderInfo* renderInfo : renderQueue)
 		{
 			assert(renderInfo->StaticMeshAsset != nullptr);
 
-			const TArray<const UMaterial*>& materials = renderInfo->Materials;
-			assert(materials.Num() > 0);
+			// Fast cache for StaticMesh & LOD
+			const FStaticMeshLOD* meshLod = nullptr;
+			uint32 meshKey = 0;
 
-			const FStaticMesh* staticMesh = renderInfo->StaticMeshAsset->GetStaticMeshAsset();
-			assert(staticMesh != nullptr);
+			if (renderInfo->StaticMeshAsset == lastStaticMeshAsset && lastLodCount <= 1)
+			{
+				meshLod = lastMeshLod;
+				meshKey = lastMeshKey;
+			}
+			else
+			{
+				lastStaticMeshAsset = renderInfo->StaticMeshAsset;
+				lastStaticMesh = lastStaticMeshAsset->GetStaticMeshAsset();
+				assert(lastStaticMesh != nullptr);
+				lastLodCount = lastStaticMesh->LODs.Num();
 
-			const int32 meshLodIndex = calculateMeshLODIndex(renderInfo, view, gpuResourceManager);
+				const int32 meshLodIndex = calculateMeshLODIndex(renderInfo, view, gpuResourceManager);
+				lastMeshLod = &lastStaticMesh->LODs[meshLodIndex];
+				lastMeshKey = lastMeshLod->BufferKey.GetDisplayId().ToUnstableInt();
 
-			const FStaticMeshLOD* meshLod = &staticMesh->LODs[meshLodIndex];
-			assert(meshLod != nullptr);
+				meshLod = lastMeshLod;
+				meshKey = lastMeshKey;
+			}
 
 			const TArray<FStaticMeshSection>& sections = meshLod->Sections;
-			// Ignore the case that the static mesh has no sections
-			assert(sections.Num() > 0 && sections.Num() == materials.Num());
+			const TArray<const UMaterial*>& materials = renderInfo->Materials;
+			const int32 sectionCount = sections.Num();
 
-
-			constexpr uint32 passKey = 0; // Assuming a single pass for now, can be modified based on requirements
-			constexpr uint32 pipelineKey = 0; // Assuming a single pipeline for now, can be modified based on requirements
-			const uint32 meshKey = meshLod->BufferKey.GetDisplayId().ToUnstableInt();
-			//const float depth = FVector::dot(renderInfo->GetLocation() - cameraLocation, cameraForward);
-			//const uint32 depthKey = static_cast<uint32>(depth * 1000.0f); // Scale depth for better precision
-			constexpr uint32 depthKey = 0; // Disabled for now.
-
-			for (int32 sectionIndex = 0; sectionIndex < sections.Num(); ++sectionIndex)
+			for (int32 sectionIndex = 0; sectionIndex < sectionCount; ++sectionIndex)
 			{
-				// Use default material if the texture renderflag is not set
 				const UMaterial* materialAsset = nullptr;
 				if (HasAllRenderFlags(renderInfo->eRenderFlags, ERenderFlags::RF_Texture))
 				{
@@ -272,29 +190,63 @@ namespace
 					materialAsset = &defaultMaterialAsset;
 				}
 
-				const uint32 materialKey = static_cast<uint32>(materialAsset->UUID);
+				FSortKey sortKey;
+				const FMaterial* mat = nullptr;
 
-				FSortKey sortKey = FSortKey(passKey, depthKey, pipelineKey, materialKey, meshKey, true);
-
-				FStaticMeshRenderQueueEntry entry =
+				if (materialAsset == lastMaterialAsset && meshKey == lastMeshKey && renderInfo->eRenderFlags == lastFlags)
 				{
-					.SortKey = sortKey,
-					.RenderInfo = renderInfo,
-					.StartIndex = sections[sectionIndex].StartIndex,
-					.IndexCount = sections[sectionIndex].IndexCount,
-					.StaticMeshLOD = meshLod,
-					.Material = materialAsset->GetMaterial()
-				};
+					sortKey = lastSortKey;
+					mat = lastMaterial;
+				}
+				else
+				{
+					lastMaterialAsset = materialAsset;
+					lastMaterial = materialAsset->GetMaterial();
+					lastFlags = renderInfo->eRenderFlags;
+					mat = lastMaterial;
 
-				outSortedQueue.Add(std::move(entry));
+					const uint32 materialKey = static_cast<uint32>(materialAsset->UUID);
+					constexpr uint32 passKey = 0;
+					constexpr uint32 depthKey = 0;
+					constexpr uint32 pipelineKey = 0;
+					lastSortKey = FSortKey(passKey, depthKey, pipelineKey, materialKey, meshKey, true);
+					sortKey = lastSortKey;
+				}
+
+				FStaticMeshRenderQueueEntry entry;
+				entry.SortKey = sortKey;
+				entry.RenderInfo = renderInfo;
+				entry.StartIndex = sections[sectionIndex].StartIndex;
+				entry.IndexCount = sections[sectionIndex].IndexCount;
+				entry.StaticMeshLOD = meshLod;
+				entry.Material = mat;
+
+				outSortedQueue.Add(entry);
 			}
 		}
 
-		// Sort the queue based on the sort key
-		std::sort(outSortedQueue.begin(), outSortedQueue.end(),
-			[](const FStaticMeshRenderQueueEntry& a, const FStaticMeshRenderQueueEntry& b) -> bool {
-				return a.SortKey.Key < b.SortKey.Key;
-			});
+		// Sort the queue based on the sort key only if multiple distinct keys exist
+		if (outSortedQueue.Num() > 1)
+		{
+			bool bNeedsSort = false;
+			const uint64 firstKey = outSortedQueue[0].SortKey.Key;
+			for (const auto& entry : outSortedQueue)
+			{
+				if (entry.SortKey.Key != firstKey)
+				{
+					bNeedsSort = true;
+					break;
+				}
+			}
+
+			if (bNeedsSort)
+			{
+				std::sort(outSortedQueue.begin(), outSortedQueue.end(),
+					[](const FStaticMeshRenderQueueEntry& a, const FStaticMeshRenderQueueEntry& b) -> bool {
+						return a.SortKey.Key < b.SortKey.Key;
+					});
+			}
+		}
 	}
 }
 
@@ -377,8 +329,19 @@ void FGraphicsManager::updateRenderQueue(
 	)
 {
 	const int32 count = objectIndices ? objectIndices->Num() : renderInfos.Num();
+	if (count == 0) return;
 
-	for(int32 k = 0; k < count; k++){
+	auto& staticMeshQueue = outRenderQueueMap[RQT_StaticMesh];
+	auto& billboardQueue = outRenderQueueMap[RQT_BillboardText];
+	auto& worldAxisQueue = outRenderQueueMap[RQT_WorldAxis];
+	auto& gizmoQueue = outRenderQueueMap[RQT_Gizmo];
+	auto& boundingBoxQueue = outRenderQueueMap[RQT_BoundingBox];
+	auto& particleQueue = outRenderQueueMap[RQT_Particle];
+
+	staticMeshQueue.Reserve(staticMeshQueue.Num() + count);
+
+	for (int32 k = 0; k < count; k++)
+	{
 		const FRenderInfo* renderInfo = objectIndices ? renderInfos[(*objectIndices)[k]] : renderInfos[k];
 
 		if (frustum != nullptr)
@@ -395,43 +358,31 @@ void FGraphicsManager::updateRenderQueue(
 			!HasAnyRenderFlags(renderFlags, ERenderFlags::RF_Billboard) &&
 			HasViewShowFlag(showFlags, EEngineShowFlags::SF_Primitives))
 		{
-			// TODO: Unify all of these into just static mesh
-			//if (renderInfo.ePrimitive == EPrimitive::EP_StaticMesh)
-			//{
-			outRenderQueueMap[RQT_StaticMesh].Add(renderInfo);
-			//}
-			//else if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_Texture))
-			//{
-			//	outRenderQueueMap[RQT_TexturedPrimitive].Add(&renderInfo);
-			//}
-			//else
-			//{
-			//	outRenderQueueMap[RQT_SimplePrimitive].Add(&renderInfo);
-			//}
+			staticMeshQueue.Add(renderInfo);
 		}
 		if (HasAllRenderFlags(renderFlags,
 			ERenderFlags::RF_Billboard | ERenderFlags::RF_Text) &&
 			HasViewShowFlag(showFlags, EEngineShowFlags::SF_BillboardText))
 		{
-			outRenderQueueMap[RQT_BillboardText].Add(renderInfo);
+			billboardQueue.Add(renderInfo);
 		}
 		if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_WorldAxis) &&
 			HasViewShowFlag(showFlags, EEngineShowFlags::SF_WorldAxis))
 		{
-			outRenderQueueMap[RQT_WorldAxis].Add(renderInfo);
+			worldAxisQueue.Add(renderInfo);
 		}
 		if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_Gizmo))
 		{
-			outRenderQueueMap[RQT_Gizmo].Add(renderInfo);
+			gizmoQueue.Add(renderInfo);
 		}
 		if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_BoundingBox) &&
 			HasViewShowFlag(showFlags, EEngineShowFlags::SF_BoundingBox))
 		{
-			outRenderQueueMap[RQT_BoundingBox].Add(renderInfo);
+			boundingBoxQueue.Add(renderInfo);
 		}
 		if (HasAllRenderFlags(renderFlags, ERenderFlags::RF_Particle))
 		{
-			outRenderQueueMap[RQT_Particle].Add(renderInfo);
+			particleQueue.Add(renderInfo);
 		}
 	}
 }
@@ -483,37 +434,42 @@ void FGraphicsManager::RenderSceneView(
 			mCullInside.Add(idx);
 		}
 	}
-	// 인스턴스 테스트용(큐브 1만개 출력=
 	// Prepare Render queue
-	// renderInfos includes primtives, textured primitives, billboard, and gizmo render infos
-	// Each render info is splitted into different render queues
-	TMap<ERenderQueueType, TArray<const FRenderInfo*>> renderQueueMap;
-	updateRenderQueue(scenerRenderInfos, &mCullInside, renderQueueMap, nullptr, view.showFlags);
-	//updateRenderQueue(scenerRenderInfos, &mCullIntersect, renderQueueMap, &frustum, view.showFlags);
-	updateRenderQueue(axisRenderInfos, nullptr, renderQueueMap, nullptr, view.showFlags);
+	mRenderQueueMap[RQT_SimplePrimitive].Reset(0);
+	mRenderQueueMap[RQT_TexturedPrimitive].Reset(0);
+	mRenderQueueMap[RQT_BillboardText].Reset(0);
+	mRenderQueueMap[RQT_WorldAxis].Reset(0);
+	mRenderQueueMap[RQT_Gizmo].Reset(0);
+	mRenderQueueMap[RQT_BoundingBox].Reset(0);
+	mRenderQueueMap[RQT_Particle].Reset(0);
+	mRenderQueueMap[RQT_StaticMesh].Reset(0);
 
-	sortRenderQueueByDistance(renderQueueMap[RQT_Particle], view.cameraLocation, view.cameraForward);
+	updateRenderQueue(scenerRenderInfos, &mCullInside, mRenderQueueMap, nullptr, view.showFlags);
+	//updateRenderQueue(scenerRenderInfos, &mCullIntersect, mRenderQueueMap, &frustum, view.showFlags);
+	updateRenderQueue(axisRenderInfos, nullptr, mRenderQueueMap, nullptr, view.showFlags);
+
+	sortRenderQueueByDistance(mRenderQueueMap[RQT_Particle], view.cameraLocation, view.cameraForward);
 
 	// Simple primitives are currently routed through RQT_StaticMesh.
-	renderTexturedPrimitive(renderQueueMap[RQT_TexturedPrimitive], view);
-	renderStaticMesh(renderQueueMap[RQT_StaticMesh], view);
+	renderTexturedPrimitive(mRenderQueueMap[RQT_TexturedPrimitive], view);
+	renderStaticMesh(mRenderQueueMap[RQT_StaticMesh], view);
 
-	renderBillboardText(renderQueueMap[RQT_BillboardText], view);
+	renderBillboardText(mRenderQueueMap[RQT_BillboardText], view);
 
 	// Line Buffer에 넣기전에 Buffer의 용량을 미리 지정하여 동적할당 방지
-	CalculateLineBuffer(renderQueueMap[RQT_BoundingBox]);
+	CalculateLineBuffer(mRenderQueueMap[RQT_BoundingBox]);
 
 	//월드 축. 액터 뒤에 그려서 같은 깊이 버퍼로 가려지게 한다 (기즈모와 달리 깊이를 지우지 않는다)
-	renderWorldAxis(renderQueueMap[RQT_WorldAxis]);
+	renderWorldAxis(mRenderQueueMap[RQT_WorldAxis]);
 
 	if (view.HasShowFlag(EEngineShowFlags::SF_Grid))
 	{
 		renderGrid(view);
 	}
-	renderBoundingBox(renderQueueMap[RQT_BoundingBox], view.cameraRotation);
+	renderBoundingBox(mRenderQueueMap[RQT_BoundingBox], view.cameraRotation);
 	FlushLines(view);
 
-	renderParticle(renderQueueMap[RQT_Particle], view);
+	renderParticle(mRenderQueueMap[RQT_Particle], view);
 
 	//강조
 	if (selectedActor)
@@ -528,7 +484,7 @@ void FGraphicsManager::RenderSceneView(
 		ID3D11DeviceContext* context = mRenderer->GetDeviceContext();
 		ID3D11Device* device = mRenderer->GetDevice();
 		ID3D11ShaderResourceView* depthSRV = mRenderer->GetDepthBufferSRV();
-		const TArray<const FRenderInfo*>& staticMeshQueue = renderQueueMap[RQT_StaticMesh];
+		const TArray<const FRenderInfo*>& staticMeshQueue = mRenderQueueMap[RQT_StaticMesh];
 		D3D11_VIEWPORT totalVP = mRenderer->GetViewportInfo();
 
 		if (depthSRV && staticMeshQueue.Num() > 0)
@@ -577,10 +533,10 @@ void FGraphicsManager::RenderGizmoView(const TArray<const FRenderInfo*>& gizmoRe
 
 	mRenderer->BeginView(view.Rect);
 
-	TMap<ERenderQueueType, TArray<const FRenderInfo*>> renderQueueMap;
+	mRenderQueueMap[RQT_Gizmo].Reset(0);
 
-	updateRenderQueue(gizmoRenderInfos, nullptr, renderQueueMap, nullptr, view.showFlags);
-	renderGizmo(renderQueueMap[RQT_Gizmo], view);
+	updateRenderQueue(gizmoRenderInfos, nullptr, mRenderQueueMap, nullptr, view.showFlags);
+	renderGizmo(mRenderQueueMap[RQT_Gizmo], view);
 }
 
 void FGraphicsManager::renderSimplePrimitive(const TArray<const FRenderInfo*>& renderInfos, const FSceneView& view)
@@ -669,10 +625,10 @@ void FGraphicsManager::renderStaticMesh(const TArray<const FRenderInfo*>& render
 		return;
 	}
 
-	TArray<const FRenderInfo*> visibleRenderInfos;
 	if (mbEnableHiZ)
 	{
-		hiZOcclusionCulling(view.HiZBuffer,renderInfos, visibleRenderInfos);
+		mVisibleRenderInfos.Reset(0);
+		hiZOcclusionCulling(view.HiZBuffer, renderInfos, mVisibleRenderInfos);
 	}
 
 	assert(mGpuResourceManagerRef);
@@ -681,99 +637,129 @@ void FGraphicsManager::renderStaticMesh(const TArray<const FRenderInfo*>& render
 
 	mRenderer->PrepareStaticMesh();
 
-	// Sort the renderInfos based on following criteria:
-	// 1. Material (to minimize shader and texture switches)
-	// 2. Mesh (to minimize vertex buffer switches)
-	// 3. Depth (to use occlusion culling? )
-
-	// TODO: Consider reusing this variable across frames to avoid reallocating memory every frame.
-	TArray<FStaticMeshRenderQueueEntry> sortedQueue;
+	// Sort the renderInfos based on criteria
+	mStaticMeshRenderQueue.Reset(0);
 
 	const UMaterial* defaultMaterialAsset = assets.FindMaterialAssetOrNull(BuiltinAssets::DefaultMaterial);
 	assert(defaultMaterialAsset != nullptr);
-	sortStaticMeshRenderQueue((mbEnableHiZ ? visibleRenderInfos : renderInfos),
-		sortedQueue,
+	sortStaticMeshRenderQueue((mbEnableHiZ ? mVisibleRenderInfos : renderInfos),
+		mStaticMeshRenderQueue,
 		view,
 		*defaultMaterialAsset,
 		*mGpuResourceManagerRef);
+
+	// Update frame constants (Slot 0) once per frame
+	mRenderer->UpdateFrameConstant(view.viewProjectionMatrix);
+
+	ID3D11DeviceContext* context = mRenderer->GetDeviceContext();
+	ID3D11DeviceContext1* context1 = mRenderer->GetDeviceContext1();
+	ID3D11Buffer* perObjectCB = mRenderer->GetPerObjectConstantBuffer();
+
+	const uint32 totalObjects = mStaticMeshRenderQueue.Num();
+	constexpr uint32 CHUNK_SIZE = 256;
 
 	// Cache last used material and mesh to minimize state changes
 	const FStaticMeshLOD* lastUsedMeshLOD = nullptr;
 	const FMaterial* lastUsedMaterial = nullptr;
 	const FBuffer* lastUsedBuffer = nullptr;
-	for (const auto& entry : sortedQueue)
+
+	for (uint32 chunkStart = 0; chunkStart < totalObjects; chunkStart += CHUNK_SIZE)
 	{
-		// Set Material resources only if the material has changed
-		if (entry.Material != lastUsedMaterial)
+		const uint32 currentBatchCount = (std::min)(CHUNK_SIZE, totalObjects - chunkStart);
+		const FStaticMeshRenderQueueEntry* pChunk = &mStaticMeshRenderQueue[chunkStart];
+
+		// Batch Map (1 Map per 256 objects instead of 256 Maps)
+		D3D11_MAPPED_SUBRESOURCE mapped = {};
+		if (SUCCEEDED(context->Map(perObjectCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
 		{
-			ID3D11ShaderResourceView* diffuseTexture = nullptr;
-			ID3D11ShaderResourceView* normalTexture = nullptr;
-			ID3D11ShaderResourceView* specularTexture = nullptr;
-			if (entry.Material->DiffuseTexture.IsValid())
+			FPerObjectConstants* dst = static_cast<FPerObjectConstants*>(mapped.pData);
+			for (uint32 i = 0; i < currentBatchCount; ++i)
 			{
-				diffuseTexture = resources.FindTextureOrAdd(entry.Material->DiffuseTexture);
+				const auto& entry = pChunk[i];
+				dst[i].World = entry.RenderInfo->WorldTransformMatrix;
+
+				FLinearColor finalTint = entry.RenderInfo->Color;
+				if (entry.Material)
+				{
+					finalTint.R *= entry.Material->DiffuseColor.x;
+					finalTint.G *= entry.Material->DiffuseColor.y;
+					finalTint.B *= entry.Material->DiffuseColor.z;
+				}
+				finalTint.A = 1.0f;
+				dst[i].Tint = finalTint;
+
+				dst[i].UVScale = entry.RenderInfo->SubUVMesh ? entry.RenderInfo->SubUVMesh->UVScale : FVector2(1.0f, 1.0f);
+				dst[i].UVOffset = entry.RenderInfo->SubUVMesh ? entry.RenderInfo->SubUVMesh->UVOffset : FVector2(0.0f, 0.0f);
 			}
-			if (entry.Material->NormalTexture.IsValid())
-			{
-				normalTexture = resources.FindTextureOrAdd(entry.Material->NormalTexture);
-			}
-			if (entry.Material->SpecularTexture.IsValid())
-			{
-				specularTexture = resources.FindTextureOrAdd(entry.Material->SpecularTexture);
-			}
-			mRenderer->SetMaterialResources(
-				diffuseTexture,
-				normalTexture,
-				specularTexture,
-				&resources.GetSamplerState(SST_Wrap)
-			);
-			lastUsedMaterial = entry.Material;
+			context->Unmap(perObjectCB, 0);
 		}
 
-		// Set Mesh resources only if the mesh has changed
-		if (entry.StaticMeshLOD != lastUsedMeshLOD)
+		// Draw calls in the chunk (zero Map/Unmap)
+		for (uint32 i = 0; i < currentBatchCount; ++i)
 		{
-			lastUsedBuffer = resources.FindImmutableBufferOrAdd(entry.StaticMeshLOD->BufferKey);
-			if (lastUsedBuffer == nullptr)
+			const auto& entry = pChunk[i];
+
+			// Set Material resources only if the material has changed
+			if (entry.Material != lastUsedMaterial)
 			{
-				UE_LOG(Error, Render, "Static mesh buffer not found.");
-				assert(false);
-				continue;
+				ID3D11ShaderResourceView* diffuseTexture = nullptr;
+				ID3D11ShaderResourceView* normalTexture = nullptr;
+				ID3D11ShaderResourceView* specularTexture = nullptr;
+				if (entry.Material->DiffuseTexture.IsValid())
+				{
+					diffuseTexture = resources.FindTextureOrAdd(entry.Material->DiffuseTexture);
+				}
+				if (entry.Material->NormalTexture.IsValid())
+				{
+					normalTexture = resources.FindTextureOrAdd(entry.Material->NormalTexture);
+				}
+				if (entry.Material->SpecularTexture.IsValid())
+				{
+					specularTexture = resources.FindTextureOrAdd(entry.Material->SpecularTexture);
+				}
+				mRenderer->SetMaterialResources(
+					diffuseTexture,
+					normalTexture,
+					specularTexture,
+					&resources.GetSamplerState(SST_Wrap)
+				);
+				lastUsedMaterial = entry.Material;
 			}
-			mRenderer->SetStaticMeshResources(
-				lastUsedBuffer->Buffer.GetAddressOf(),
-				lastUsedBuffer->IndexBuffer.Get()
-			);
-			lastUsedMeshLOD = entry.StaticMeshLOD;
-		}
 
-		// Update world transform and color for the current render info
-		const FMatrix& worldTransform = entry.RenderInfo->WorldTransformMatrix;
-		FLinearColor finalTint = entry.RenderInfo->Color;
+			// Set Mesh resources only if the mesh has changed
+			if (entry.StaticMeshLOD != lastUsedMeshLOD)
+			{
+				lastUsedBuffer = resources.FindImmutableBufferOrAdd(entry.StaticMeshLOD->BufferKey);
+				if (lastUsedBuffer == nullptr)
+				{
+					UE_LOG(Error, Render, "Static mesh buffer not found.");
+					assert(false);
+					continue;
+				}
+				mRenderer->SetStaticMeshResources(
+					lastUsedBuffer->Buffer.GetAddressOf(),
+					lastUsedBuffer->IndexBuffer.Get()
+				);
+				lastUsedMeshLOD = entry.StaticMeshLOD;
+			}
 
-		finalTint.R *= entry.Material->DiffuseColor.x;
-		finalTint.G *= entry.Material->DiffuseColor.y;
-		finalTint.B *= entry.Material->DiffuseColor.z;
-		finalTint.A = 1.0f;
+			// Bind offset constant buffer for current object (16 float4 vectors = 256 bytes)
+			if (context1)
+			{
+				UINT firstConstant = i * 16;
+				UINT numConstants = 16;
+				context1->VSSetConstantBuffers1(1, 1, &perObjectCB, &firstConstant, &numConstants);
+				context1->PSSetConstantBuffers1(1, 1, &perObjectCB, &firstConstant, &numConstants);
+			}
 
-		const FVector2 uvScale = entry.RenderInfo->SubUVMesh ? entry.RenderInfo->SubUVMesh->UVScale : FVector2(1.0f, 1.0f);
-		const FVector2 uvOffset = entry.RenderInfo->SubUVMesh ? entry.RenderInfo->SubUVMesh->UVOffset : FVector2(0.0f, 0.0f);
-
-		mRenderer->UpdateTextureConstant(
-			worldTransform,
-			view.viewProjectionMatrix,
-			finalTint,
-			uvScale,
-			uvOffset
-		);
-
-		if (lastUsedBuffer->IndexBuffer)
-		{
-			mRenderer->DrawIndexedBuffer(entry.IndexCount, entry.StartIndex);
-		}
-		else
-		{
-			mRenderer->DrawVertexBuffer(lastUsedBuffer->SourceNum);
+			if (lastUsedBuffer->IndexBuffer)
+			{
+				context->DrawIndexed(entry.IndexCount, entry.StartIndex, 0);
+			}
+			else
+			{
+				context->Draw(lastUsedBuffer->SourceNum, 0);
+			}
 		}
 	}
 }
@@ -952,26 +938,34 @@ void FGraphicsManager::renderStaticMesh(const TArray<const FRenderInfo*>& render
 
 void FGraphicsManager::hiZOcclusionCulling(FHiZBuffer* inHiZBuffer, const TArray<const FRenderInfo*>& inRenderInfos, TArray<const FRenderInfo*>& outRenderInfos)
 {
-	// Get visibility mask from prev frame(N - 1)
+	outRenderInfos.Reset(0);
+
 	ID3D11DeviceContext* context = mRenderer->GetDeviceContext();
 	uint32 maskCount = 0;
 	const uint32* visibilityMask = nullptr;
-	if (mbEnableHiZ)
+	if (mbEnableHiZ && inHiZBuffer)
 	{
 		visibilityMask = inHiZBuffer->ReadbackVisibility(context, maskCount);
 	}
 
-	if (!visibilityMask)
+	const int32 numInfos = inRenderInfos.Num();
+	const FRenderInfo* const* rawInfos = inRenderInfos.GetData();
+
+	if (!visibilityMask || maskCount == 0)
 	{
-		outRenderInfos = inRenderInfos;
+		outRenderInfos.Reserve(numInfos);
+		for (int32 i = 0; i < numInfos; ++i)
+		{
+			outRenderInfos.Add(rawInfos[i]);
+		}
 		return;
 	}
 
-	// Get renderInfos	
-	outRenderInfos.Reserve(inRenderInfos.Num());
-	for (const FRenderInfo* info : inRenderInfos)
+	outRenderInfos.Reserve(numInfos);
+	for (int32 i = 0; i < numInfos; ++i)
 	{
-		uint32 id = info->ObejctID.InternalIndex;
+		const FRenderInfo* info = rawInfos[i];
+		const uint32 id = info->ObejctID.InternalIndex;
 		if (id >= maskCount || visibilityMask[id] != 0)
 		{
 			outRenderInfos.Add(info);
@@ -979,13 +973,6 @@ void FGraphicsManager::hiZOcclusionCulling(FHiZBuffer* inHiZBuffer, const TArray
 	}
 
 	inHiZBuffer->UnmapVisibility(context);
-
-	uint32 frustumPassed = (uint32)inRenderInfos.Num();
-	uint32 actuallyRendered = (uint32)outRenderInfos.Num();
-	uint32 occludedCount = (frustumPassed >= actuallyRendered) ? (frustumPassed - actuallyRendered) : 0;
-	float cullRatio = (frustumPassed > 0) ? ((float)occludedCount / frustumPassed * 100.0f) : 0.0f;
-	UE_LOG(Log, Render, "[Hi-Z Stats] Occlusion pass: %u -> rendering: %u (culling: %u, %.1f%%)",
-		frustumPassed, actuallyRendered, occludedCount, cullRatio);
 }
 
 void FGraphicsManager::SetEnableHiZ(bool bEnable)
